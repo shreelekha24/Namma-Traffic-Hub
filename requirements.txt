@@ -12,3 +12,4 @@ scikit-learn
 catboost
 sentence-transformers
 pulp
+torchvision
