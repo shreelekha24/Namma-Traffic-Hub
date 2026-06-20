@@ -8,7 +8,7 @@ matplotlib
 mapclassify
 streamlit-folium
 joblib
-scikit-learn
+scikit-learn==1.7.2
 catboost
 sentence-transformers
 pulp
