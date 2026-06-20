@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 networkx
-osmnx
+osmnx>=2.0.0
 folium
 streamlit-folium
 joblib

@@ -487,7 +487,7 @@ if models_loaded:
                                     height="100%"
                                 )
                         except Exception as e:
-                            st.error(f"Routing error: Could not process graph edges.")
+                            st.error(f"Routing error: Could not process graph edges. Details: {str(e)}")
                             route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
                         
                         folium.Marker(location=(latitude, longitude), popup="ACCIDENT ZONE", icon=folium.Icon(color="black", icon="info-sign")).add_to(route_map)
