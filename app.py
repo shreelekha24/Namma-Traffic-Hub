@@ -14,7 +14,7 @@ import folium
 from streamlit_folium import st_folium
 
 # --- Page Config ---
-st.set_page_config(page_title="Astram Command Center V2", page_icon="🚔", layout="wide")
+st.set_page_config(page_title="Namma Traffic Hub", page_icon="🚔", layout="wide")
 
 # --- Load Models and Assets ---
 MODEL_DIR = "models"
