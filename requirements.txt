@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+networkx
+osmnx
+folium
+streamlit-folium
+joblib
+scikit-learn
+catboost
+sentence-transformers
+pulp

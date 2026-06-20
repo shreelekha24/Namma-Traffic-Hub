@@ -5,8 +5,8 @@ import json
 import joblib
 import math
 from catboost import CatBoostRegressor, CatBoostClassifier
+from sentence_transformers import SentenceTransformer
 from recommender import generate_recommendations
-import numpy as np
 from datetime import datetime
 import osmnx as ox
 import networkx as nx
@@ -21,8 +21,11 @@ MODEL_DIR = "models"
 
 @st.cache_resource
 def load_assets():
-    model = CatBoostClassifier()
+    model = CatBoostRegressor()
     model.load_model(os.path.join(MODEL_DIR, "catboost_duration.cbm"))
+    
+    transformer_model = SentenceTransformer('all-MiniLM-L6-v2')
+    pca = joblib.load(os.path.join(MODEL_DIR, "pca_transformer.pkl"))
     
     with open(os.path.join(MODEL_DIR, "ui_options.json"), "r") as f:
         options = json.load(f)
@@ -32,10 +35,11 @@ def load_assets():
         
     jurisdiction_model = joblib.load(os.path.join(MODEL_DIR, "jurisdiction_model.pkl"))
     corridor_model = joblib.load(os.path.join(MODEL_DIR, "corridor_model.pkl"))
-    road_closure_model = CatBoostClassifier()
-    road_closure_model.load_model(os.path.join(MODEL_DIR, "road_closure_model.cbm"))
+    
+    rc_model = CatBoostClassifier()
+    rc_model.load_model(os.path.join(MODEL_DIR, "road_closure_model.cbm"))
         
-    return model, options, station_coords, jurisdiction_model, corridor_model, road_closure_model
+    return model, transformer_model, pca, options, station_coords, jurisdiction_model, corridor_model, rc_model
 
 @st.cache_data
 def get_city_graph():
@@ -57,158 +61,199 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * c
 
 try:
-    model, options, station_coords, jurisdiction_model, corridor_model, road_closure_model = load_assets()
+    model, transformer_model, pca, options, station_coords, jurisdiction_model, corridor_model, rc_model = load_assets()
     models_loaded = True
 except Exception as e:
     models_loaded = False
     st.error(f"Models not found or failed to load. Please run train_model.py first. Error: {e}")
 
-# --- Dark/Light Mode Toggle ---
-dark_mode = st.toggle("Dark Mode", value=True)
-
-# --- Professional UI/UX CSS Overrides ---
-css_base = """
+# --- Premium Custom CSS ---
+st.markdown("""
 <style>
-    /* Pin the toggle to the top right, fixed */
-    div[data-testid="stCheckbox"] {
-        position: fixed;
-        top: 12px;
-        right: 100px;
-        z-index: 999999;
-        background-color: rgba(0,0,0,0.1);
-        padding: 5px 15px;
-        border-radius: 20px;
-        backdrop-filter: blur(5px);
+    /* Premium UI enhancements */
+    
+    /* Refined Input Fields */
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="textarea"] > div {
+        background-color: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid rgba(255, 255, 255, 0.15) !important;
+        border-radius: 6px !important;
+        transition: all 0.2s ease;
     }
     
-    /* Metric Cards Styling */
+    div[data-baseweb="input"] input,
+    div[data-baseweb="select"] div,
+    div[data-baseweb="textarea"] textarea {
+        color: #FFFFFF !important;
+    }
+    
+    /* Input Hover States */
+    div[data-baseweb="input"] > div:hover,
+    div[data-baseweb="select"] > div:hover,
+    div[data-baseweb="textarea"] > div:hover {
+        border-color: rgba(255, 255, 255, 0.3) !important;
+        background-color: rgba(255, 255, 255, 0.06) !important;
+    }
+    
+    /* Input Focus States */
+    div[data-baseweb="input"] > div:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    div[data-baseweb="textarea"] > div:focus-within {
+        border-color: #F4C095 !important;
+        background-color: rgba(255, 255, 255, 0.08) !important;
+        box-shadow: 0 0 0 1px #F4C095 !important;
+    }
+    
+    /* Metric Cards */
+    div[data-testid="stMetric"] {
+        background-color: #1D7874;
+        padding: 15px 20px;
+        border-radius: 8px;
+        border: 1px solid #679289;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        border-color: #F4C095;
+    }
+    
     div[data-testid="stMetricValue"] {
         font-size: 2.2rem !important;
-        color: #3b82f6;
-        text-shadow: 0px 0px 10px rgba(59, 130, 246, 0.4);
+        color: #F4C095;
+        font-weight: 700;
     }
     div[data-testid="stMetricLabel"] {
+        font-size: 0.95rem !important;
         font-weight: 600;
+        color: #FFFFFF;
         text-transform: uppercase;
-        letter-spacing: 1px;
+        letter-spacing: 0.05em;
     }
     
-    /* Button Styling */
-    .stButton>button {
-        background: linear-gradient(90deg, #2563eb 0%, #1d4ed8 100%);
-        color: white;
-        border: none;
-        box-shadow: 0 4px 10px rgba(37, 99, 235, 0.3);
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        border-radius: 6px;
-        transition: all 0.3s ease;
+    /* Primary Button */
+    .stButton>button[kind="primary"] {
+        background-color: #EE2E31 !important;
+        color: #FFFFFF !important;
+        font-weight: 600 !important;
+        border: 1px solid #EE2E31 !important;
+        border-radius: 6px !important;
+        padding: 0.5rem 1rem !important;
+        transition: all 0.2s ease !important;
     }
-    .stButton>button:hover {
-        background: linear-gradient(90deg, #1d4ed8 0%, #1e40af 100%);
-        border: none;
-        box-shadow: 0 6px 14px rgba(37, 99, 235, 0.5);
-        transform: translateY(-1px);
+    .stButton>button[kind="primary"]:hover {
+        background-color: #F4C095 !important;
+        color: #071E22 !important;
+        box-shadow: 0 0 10px rgba(244, 192, 149, 0.4) !important;
     }
-"""
+    
+    /* Dividers */
+    hr {
+        border-color: #679289;
+        margin-top: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-if dark_mode:
-    css_theme = """
-    /* Dark Theme Colors */
-    .stApp { background-color: #0b0f19; color: #f0f6fc; }
-    [data-testid="stSidebar"] { background-color: #161b22; }
-    div[data-testid="metric-container"] { background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.5); }
-    .streamlit-expanderHeader { background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; }
-    .streamlit-expanderContent { border: 1px solid #30363d; background-color: #0b0f19; }
-    hr { border-color: #30363d; }
-    
-    /* Force Text Visibility */
-    h1, h2, h3, h4, p, label, span, li, .stMarkdown { color: #f0f6fc !important; }
-    div[data-testid="stMetricValue"] { color: #3b82f6 !important; }
-    
-    /* Input Fields styling */
-    input, div[data-baseweb="select"] > div, div[data-baseweb="base-input"], div[role="listbox"] {
-        background-color: #161b22 !important;
-        color: #f0f6fc !important;
-        -webkit-text-fill-color: #f0f6fc !important;
-    }
-    </style>
-    """
-else:
-    css_theme = """
-    /* Light Theme Colors */
-    .stApp { background-color: #f8fafc; color: #0f172a; }
-    [data-testid="stSidebar"] { background-color: #f1f5f9; }
-    div[data-testid="metric-container"] { background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .streamlit-expanderHeader { background-color: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 6px; }
-    .streamlit-expanderContent { border: 1px solid #e2e8f0; background-color: #ffffff; }
-    hr { border-color: #e2e8f0; }
-    
-    /* Force Text Visibility */
-    h1, h2, h3, h4, p, label, span, li, .stMarkdown { color: #0f172a !important; }
-    div[data-testid="stMetricValue"] { color: #3b82f6 !important; }
-    
-    /* Input Fields styling */
-    input, div[data-baseweb="select"] > div, div[data-baseweb="base-input"], div[role="listbox"] {
-        background-color: #ffffff !important;
-        color: #0f172a !important;
-        -webkit-text-fill-color: #0f172a !important;
-    }
-    </style>
-    """
-
-st.markdown(css_base + css_theme, unsafe_allow_html=True)
-
-st.title("🚔 Astram Command Center")
-st.markdown("### AI-Powered Congestion Forecasting & MILP Tactical Resource Deployment")
+st.title("🚔 Namma Traffic Hub")
+st.markdown("##### AI-Powered Congestion Forecasting & Tactical Deployment Engine")
+st.markdown("---")
 
 if models_loaded:
-    if 'map_lat' not in st.session_state:
-        st.session_state.map_lat = 12.9870
-    if 'map_lon' not in st.session_state:
-        st.session_state.map_lon = 77.5960
-
     # --- Sidebar: User Inputs ---
     # 1. Essential Information
     event_type = st.sidebar.selectbox("Event Type", options['event_type'], index=options['event_type'].index("unplanned") if "unplanned" in options['event_type'] else 0)
     
+    specify_end = False
+    crowd_size = 0
+    if event_type == "planned":
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Planned Event Details")
+        crowd_size = st.sidebar.number_input("Expected Crowd Size", min_value=0, value=0, step=100)
+        specify_end = st.sidebar.checkbox("Specify Planned End Time")
+        if specify_end:
+            from datetime import datetime
+            if "default_end_time" not in st.session_state:
+                st.session_state.default_end_time = datetime.now().time()
+            planned_end_time = st.sidebar.time_input("Planned End Time", value=st.session_state.default_end_time)
+        st.sidebar.markdown("---")
     st.sidebar.subheader("Location")
-    address_query = st.sidebar.text_input("Search Landmark/Address", "Cubbon Park, Bengaluru")
     
-    # Geocode the address into coordinates
-    if st.sidebar.button("Search Landmark"):
+    # Initialize session state for location
+    if "marker_lat" not in st.session_state:
+        st.session_state.marker_lat = 12.9716
+        st.session_state.marker_lon = 77.5946
+    if "last_query" not in st.session_state:
+        st.session_state.last_query = "Bengaluru"
+        
+    # 1. Text Search to center the map
+    address_query = st.sidebar.text_input("🔍 Search Landmark (Press Enter to center map)", st.session_state.last_query)
+    
+    # Update marker to searched location if search query changed
+    if address_query != st.session_state.last_query:
+        st.session_state.last_query = address_query
         try:
             if address_query:
-                auto_lat, auto_lon = ox.geocode(address_query)
-                st.session_state.map_lat = float(auto_lat)
-                st.session_state.map_lon = float(auto_lon)
+                st.session_state.marker_lat, st.session_state.marker_lon = ox.geocode(address_query)
                 st.rerun()
         except Exception:
             st.sidebar.caption("⚠️ Could not find address.")
+            
+    # 2. Interactive Map for location selection
+    m = folium.Map(location=[st.session_state.marker_lat, st.session_state.marker_lon], zoom_start=13)
+    # Add the marker to the map BEFORE rendering it!
+    folium.Marker(
+        [st.session_state.marker_lat, st.session_state.marker_lon], 
+        icon=folium.Icon(color="red", icon="info-sign"),
+        tooltip="Incident Location"
+    ).add_to(m)
+    
+    # Create Dashboard Layout
+    dash_col1, dash_col2 = st.columns([3, 1])
+    
+    with dash_col1:
+        st.markdown("### 🗺️ Incident Location Tracker")
+        st.markdown("👉 **Click anywhere on the map to drop a pin and set the exact incident coordinates:**")
+        
+        # Make the map full width in the main container instead of tiny
+        map_data = st_folium(m, height=450, use_container_width=True, key="location_map")
+        
+    with dash_col2:
+        st.markdown("### 📡 System Status")
+        st.success("🟢 ML Forecasting: **Online**")
+        st.success("🟢 NLP Engine: **Online**")
+        st.success("🟢 Graph Router: **Online**")
+        st.markdown("---")
+        st.markdown("### 📝 Quick Guide")
+        st.info("1. Pin location on map.")
+        st.info("2. Add dispatch notes in sidebar.")
+        st.info("3. Hit **Predict** for tactical plan.")
+    
+    # 3. Extract coordinates from map click
+    if map_data and map_data.get("last_clicked"):
+        clicked_lat = map_data["last_clicked"]["lat"]
+        clicked_lon = map_data["last_clicked"]["lng"]
+        
+        # If the user clicked a new spot, update session state and rerun to move the red marker!
+        if round(clicked_lat, 4) != round(st.session_state.marker_lat, 4) or round(clicked_lon, 4) != round(st.session_state.marker_lon, 4):
+            st.session_state.marker_lat = clicked_lat
+            st.session_state.marker_lon = clicked_lon
+            st.rerun()
         
     col1, col2 = st.sidebar.columns(2)
     with col1:
-        latitude = st.number_input("Lat", value=st.session_state.map_lat, format="%.4f")
+        latitude = st.number_input("Lat", value=float(st.session_state.marker_lat), format="%.4f")
     with col2:
-        longitude = st.number_input("Lon", value=st.session_state.map_lon, format="%.4f")
-        
-    # Keep session state in sync with manual input changes
-    if abs(latitude - st.session_state.map_lat) > 0.0001 or abs(longitude - st.session_state.map_lon) > 0.0001:
-        st.session_state.map_lat = latitude
-        st.session_state.map_lon = longitude
-        st.rerun()
-
+        longitude = st.number_input("Lon", value=float(st.session_state.marker_lon), format="%.4f")
     
     st.sidebar.subheader("Timing")
-    if 'event_time_val' not in st.session_state:
-        st.session_state.event_time_val = datetime.now().time()
-    time_of_event = st.sidebar.time_input("Time of Event", value=st.session_state.event_time_val)
-    st.session_state.event_time_val = time_of_event
-    
-    if 'day_val' not in st.session_state:
-        st.session_state.day_val = datetime.now().weekday()
-    day_of_week = st.sidebar.selectbox("Day of Week", [0,1,2,3,4,5,6], index=st.session_state.day_val, format_func=lambda x: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][x])
-    st.session_state.day_val = day_of_week
+    if "default_time" not in st.session_state:
+        st.session_state.default_time = datetime.now().time()
+    time_of_event = st.sidebar.time_input("Time of Event", st.session_state.default_time)
+    day_of_week = st.sidebar.selectbox("Day of Week", [0,1,2,3,4,5,6], format_func=lambda x: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][x])
     
     st.sidebar.subheader("Dispatch Notes")
     description = st.sidebar.text_area("Enter on-ground updates...", "Severe accident, truck overturned blocking both lanes.")
@@ -221,115 +266,101 @@ if models_loaded:
         "West ➡️ East"
     ])
 
-    # 2. Advanced / Optional Fields hidden to reduce clutter
-    with st.sidebar.expander("⚙️ Advanced Details (Optional)"):
-        event_cause = st.selectbox("Event Cause", options['event_cause'], index=0)
-        num_vehicles = st.number_input("Number of Vehicles Involved (For Tow Dispatch)", min_value=0, max_value=20, value=2 if event_cause == "accident" else 0)
-        # Corridor is now auto-assigned by ML
-        veh_type = st.selectbox("Vehicle Type", options['veh_type'], index=0)
-        priority = st.selectbox("Priority Level", options['priority'], index=0)
-        # Road Closure is now auto-assigned by ML
-
-    # --- Main Screen Layout ---
-    st.divider()
-    main_col1, main_col2 = st.columns([1, 1])
+    st.sidebar.subheader("Incident Details")
+    event_cause = st.sidebar.selectbox("Event Cause", options['event_cause'], index=0)
+    veh_type = st.sidebar.selectbox("Vehicle Type", options['veh_type'], index=0)
+    priority = st.sidebar.selectbox("Priority Level", options['priority'], index=0)
     
-    with main_col1:
-        st.subheader("Interactive Command Map")
-        st.markdown("📍 Click anywhere on the map to set the incident location.")
-        
-        # Base interactive map
-        base_m = folium.Map(location=[st.session_state.map_lat, st.session_state.map_lon], zoom_start=13, tiles="cartodbpositron")
-        folium.Marker(
-            location=[st.session_state.map_lat, st.session_state.map_lon], 
-            popup="Target Location", 
-            icon=folium.Icon(color="blue", icon_color="#ffffff", icon="crosshairs", prefix='fa')
-        ).add_to(base_m)
-        
-        map_data = st_folium(base_m, width="100%", height=500, key="base_map")
-        
-        # Check if user clicked the map
-        if map_data and map_data.get("last_clicked"):
-            lat = map_data["last_clicked"]["lat"]
-            lon = map_data["last_clicked"]["lng"]
-            if abs(lat - st.session_state.map_lat) > 0.0001 or abs(lon - st.session_state.map_lon) > 0.0001:
-                st.session_state.map_lat = lat
-                st.session_state.map_lon = lon
-                st.rerun()
-                
-    with main_col2:
-        # We will show predictions here when button is clicked
-        prediction_placeholder = st.empty()
+    with st.sidebar.expander("⚙️ Optional Advanced Predictors"):
+        st.caption("*(Only needed when the event involves a vehicle breakdown or cargo)*")
+        reason_breakdown = st.text_input("Reason for Breakdown", "")
+        cargo_material = st.text_input("Cargo Material", "")
+        comment = st.text_input("Additional Comments", "")
+    
+    force_road_closure = st.sidebar.checkbox("⚠️ Force Full Road Closure (Manual Override)")
+
+
 
     # --- Process Inputs on Button Click ---
     if st.sidebar.button("🚨 Predict & Generate Plan", type="primary"):
-        # --- Form Validation ---
-        current_weekday = datetime.now().weekday()
-        if event_type == "unplanned":
-            if event_cause in ["tree_fall", "water_logging"]:
-                allowed_days = [current_weekday, (current_weekday + 1) % 7, (current_weekday + 2) % 7]
-                if day_of_week not in allowed_days:
-                    st.sidebar.error("⚠️ Invalid Day: Water logging or tree falls can only be reported for today or the next 2 days.")
-                    st.stop()
-            else:
-                if day_of_week != current_weekday:
-                    st.sidebar.error("⚠️ Invalid Day: Unplanned events (like accidents) can only be reported on the present day.")
-                    st.stop()
-                    
-        with prediction_placeholder.container():
-            st.info("Executing ML Auto-Dispatch & NLP Solver...")
+        with st.spinner("Executing ML Auto-Dispatch & NLP Solver..."):
             
-            # Step 1: Auto-Predict Jurisdiction
-            auto_station_df = pd.DataFrame({'latitude': [latitude], 'longitude': [longitude]})
-            assigned_police_station = jurisdiction_model.predict(auto_station_df)[0]
+            # Step 1: Auto-Predict Jurisdiction and Corridor
+            auto_spatial_df = pd.DataFrame({'latitude': [latitude], 'longitude': [longitude]})
+            assigned_police_station = jurisdiction_model.predict(auto_spatial_df)[0]
+            assigned_corridor = corridor_model.predict(auto_spatial_df)[0]
+            
             st.success(f"🤖 **Auto-Assigned Jurisdiction:** {assigned_police_station} Traffic Police Station")
-            
-            # Step 1.5: Auto-Predict Corridor
-            assigned_corridor = corridor_model.predict(auto_station_df)[0]
-            st.success(f"🛣️ **Auto-Assigned Corridor:** {assigned_corridor}")
+            st.success(f"🤖 **Auto-Assigned Corridor:** {assigned_corridor}")
             
             # 1. Temporal Features
             hour = time_of_event.hour
             is_rush_hour = 1 if (8 <= hour <= 11) or (17 <= hour <= 20) else 0
             
-            # 2. Text Features (CatBoost Native)
-            desc_text = description if description else "none"
-            desc_lower = desc_text.lower()
-            
-            import re
-            extracted_num = 0
-            # Look for numbers followed by vehicle words
-            match = re.search(r'(\d+)\s*(truck|car|vehicle|bike|bus|auto)', desc_lower)
-            if match:
-                extracted_num = int(match.group(1))
-            
-            # Use NLP extracted number if found, otherwise fallback to UI input
-            final_num_vehicles = extracted_num if extracted_num > 0 else num_vehicles
-            
-            # Step 1.8: Auto-Predict Road Closure
-            is_vip_event_ui = (event_type == 'planned') and (event_cause in ['vip_movement', 'sports_event', 'procession', 'protest', 'public_event'])
-            
-            rc_dict = {
+            # 2. NLP Features (Transformer + PCA)
+            try:
+                base_desc = description if description else ""
+                mega_text = f"{base_desc} {reason_breakdown} {cargo_material} {comment}".strip()
+                if not mega_text:
+                    mega_text = "none"
+                    
+                desc_text = mega_text # for the downstream NLP override block
+                
+                embedding = transformer_model.encode([mega_text])
+                embedding_pca = pca.transform(embedding)[0]
+            except Exception:
+                embedding_pca = np.zeros(20)
+                desc_text = description if description else "none"
+                
+            # Step 1.5: Auto-Predict Road Closure based on text + categories
+            rc_input = {
                 'event_type': event_type,
                 'event_cause': event_cause,
                 'veh_type': veh_type,
-                'priority': priority,
-                'description': desc_text
+                'priority': priority
             }
-            rc_df = pd.DataFrame([rc_dict])
-            # road_closure_model outputs 'True' or 'False' (as string)
-            assigned_road_closure = road_closure_model.predict(rc_df)[0]
-            # Convert to boolean just in case
-            assigned_road_closure = True if assigned_road_closure == 'True' else False
+            for i in range(20):
+                rc_input[f'nlp_embed_{i}'] = embedding_pca[i]
+            rc_df = pd.DataFrame([rc_input])
+            requires_road_closure_str = rc_model.predict(rc_df)[0]
+            # Convert string to bool or keep as string depending on how it was trained
+            requires_road_closure = (str(requires_road_closure_str).lower() == "true")
             
-            if is_vip_event_ui:
-                assigned_road_closure = True
-                st.error("🚧 **Auto-Assigned Road Closure:** TRUE (Mass Crowd Event Override)")
-            elif assigned_road_closure:
-                st.error("🚧 **Auto-Assigned Road Closure:** TRUE (ML Prediction: High Risk Event)")
-            else:
-                st.success("🚧 **Auto-Assigned Road Closure:** FALSE (ML Prediction: Flow maintainable)")
+            # --- DETERMINISTIC NLP OVERRIDE ---
+            # Force road closure ONLY if description explicitly mentions full blockage or critical live wires
+            desc_lower = desc_text.lower()
+            
+            override_triggered = False
+            
+            # Condition 1: Mentions of the entire road/lanes being blocked
+            if ("whole road" in desc_lower or "full road" in desc_lower or "both lanes" in desc_lower or "entire road" in desc_lower or "whole lane" in desc_lower):
+                if "block" in desc_lower or "clos" in desc_lower:
+                    override_triggered = True
+                    
+            # Condition 2: Explicit "completely blocked"
+            if "completely blocked" in desc_lower:
+                override_triggered = True
+                
+            # Condition 3: Live wires falling
+            if ("live wire" in desc_lower or "electric wire" in desc_lower) and "fall" in desc_lower:
+                override_triggered = True
 
+            # Manual UI Override
+            if force_road_closure:
+                requires_road_closure = True
+            elif override_triggered:
+                requires_road_closure = True
+                    
+            if requires_road_closure:
+                if force_road_closure:
+                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Forced by Manual Override Checkbox)")
+                elif override_triggered:
+                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Forced by critical keywords in description)")
+                else:
+                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Full Blockage)")
+            else:
+                st.success("✅ **Auto-Predicted Road Closure:** NO (Partial/No Blockage)")
+            
             # 3. Graph Features
             G = get_city_graph()
             try:
@@ -353,55 +384,47 @@ if models_loaded:
                 'police_station': assigned_police_station,
                 'priority': priority,
                 'veh_type': veh_type,
-                'requires_road_closure': str(assigned_road_closure),
+                'requires_road_closure': requires_road_closure_str,
+                'age_of_truck': "Unknown",
                 'hour': hour,
                 'day_of_week': day_of_week,
                 'is_rush_hour': is_rush_hour,
                 'centrality': centrality,
-                'distance_to_station_km': dist_km,
-                'description': desc_text
+                'distance_to_station_km': dist_km
             }
             
+            for i in range(20):
+                input_dict[f'nlp_embed_{i}'] = embedding_pca[i]
+                
             input_df = pd.DataFrame([input_dict])
             
-            # 4. Predict Category
-            pred_category_raw = model.predict(input_df)[0]
-            pred_category = pred_category_raw[0] if isinstance(pred_category_raw, (list, np.ndarray)) else pred_category_raw
+            # 4. Predict
+            pred_duration = model.predict(input_df)[0]
+            pred_duration = max(1.0, pred_duration) # Prevent negative predictions
             
-            # Determine vehicle size category for Tow Trucks
-            veh_cat = extracted_type if 'extracted_type' in locals() and extracted_num > 0 else veh_type.lower()
+            if event_type == "planned" and specify_end:
+                from datetime import datetime, date
+                t1 = datetime.combine(date.today(), time_of_event)
+                t2 = datetime.combine(date.today(), planned_end_time)
+                diff = (t2 - t1).total_seconds() / 60.0
+                if diff < 0:
+                    diff += 24 * 60
+                # Use the manual planned duration if it's longer than what the ML model predicts
+                pred_duration = max(pred_duration, diff)
             
-            import math
-            if any(w in veh_cat for w in ["truck", "bus", "heavy", "lcv"]):
-                tow_trucks_needed = final_num_vehicles * 1.0
-            elif any(w in veh_cat for w in ["car", "taxi", "auto", "vehicle"]):
-                tow_trucks_needed = final_num_vehicles * 0.5
-            elif any(w in veh_cat for w in ["bike", "scoot"]):
-                tow_trucks_needed = final_num_vehicles * 0.2
-            else:
-                tow_trucks_needed = final_num_vehicles * 0.5
-                
-            tow_trucks_needed = math.ceil(tow_trucks_needed)
-            
-            # Scale tow trucks based on Time Predicted (urgency)
-            if tow_trucks_needed > 0:
-                if pred_category == "> 2 hours":
-                    tow_trucks_needed += 2  # Max urgency
-                elif pred_category == "1-2 hours":
-                    tow_trucks_needed += 1  # High urgency
-                    
             # 5. Generate Recommendations using PuLP
-            recs = generate_recommendations(pred_category, event_type, event_cause, assigned_road_closure, int(tow_trucks_needed))
+            recs = generate_recommendations(pred_duration, event_type, event_cause, requires_road_closure, crowd_size=crowd_size, desc_text=desc_text)
             
             # --- Display Results ---
             st.divider()
-            with st.container():
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
                 st.subheader("⏱️ Forecasting Engine")
-                st.metric(label="Predicted Clearance Time", value=f"{pred_category}")
+                st.metric(label="Predicted Clearance Time", value=f"{int(pred_duration)} mins")
                 
-                if recs['priority_alert'] == "Critical":
-                    st.error("🚨 CRITICAL: VIP / High-Profile Public Event")
-                elif recs['priority_alert'] == "High":
+                if recs['priority_alert'] == "High":
                     st.error("CRITICAL: High Impact Incident")
                 elif recs['priority_alert'] == "Medium":
                     st.warning("WARNING: Moderate Impact Incident")
@@ -418,7 +441,7 @@ if models_loaded:
                 for action in recs['action_plan']:
                     st.markdown(f"- {action}")
                     
-            with st.container():
+            with col2:
                 st.subheader("🗺️ Spatial-Graph Diversion Engine")
                 if recs['diversion_advised']:
                     st.info("Calculating optimal diversion using OpenStreetMap Graph...")
@@ -426,51 +449,48 @@ if models_loaded:
                     try:
                         G = get_city_graph()
                         
-                        # Find the incident node
-                        incident_node = ox.distance.nearest_nodes(G, longitude, latitude)
-                        
-                        # True Graph Routing: Temporarily remove the incident node
+                        # True Graph Routing: Block the impacted area
                         G_copy = G.copy()
-                        if incident_node in G_copy:
-                            G_copy.remove_node(incident_node)
-                            
-                        # Simulate a vehicle trying to travel through this area based on user-selected direction
-                        # 0.008 degrees is roughly 800 meters
-                        if traffic_direction == "North ➡️ South":
-                            orig_node = ox.distance.nearest_nodes(G_copy, longitude, latitude + 0.008)
-                            dest_node = ox.distance.nearest_nodes(G_copy, longitude, latitude - 0.008)
-                        elif traffic_direction == "South ➡️ North":
-                            orig_node = ox.distance.nearest_nodes(G_copy, longitude, latitude - 0.008)
-                            dest_node = ox.distance.nearest_nodes(G_copy, longitude, latitude + 0.008)
-                        elif traffic_direction == "East ➡️ West":
-                            orig_node = ox.distance.nearest_nodes(G_copy, longitude + 0.008, latitude)
-                            dest_node = ox.distance.nearest_nodes(G_copy, longitude - 0.008, latitude)
-                        else: # West ➡️ East
-                            orig_node = ox.distance.nearest_nodes(G_copy, longitude - 0.008, latitude)
-                            dest_node = ox.distance.nearest_nodes(G_copy, longitude + 0.008, latitude)
                         
-                        # Calculate Shortest Path bypassing the blocked node
+                        # 1. Identify the impacted physical road segment (edge u -> v)
                         try:
-                            route = nx.shortest_path(G_copy, orig_node, dest_node, weight='length')
+                            nearest_edge = ox.distance.nearest_edges(G_copy, longitude, latitude)
+                            u, v, key = nearest_edge
                             
-                            if len(route) < 2:
-                                st.warning("⚠️ Incident location is outside the core city network or isolated. No diversion possible.")
-                                route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="cartodbpositron")
+                            # 2. Block the road by removing it from our mathematical graph
+                            G_copy.remove_edge(u, v, key)
+                            if G_copy.has_edge(v, u, key):
+                                G_copy.remove_edge(v, u, key)
+                                
+                            # 3. Calculate Detour topologically (from u to v through the rest of the city)
+                            # This completely avoids "off map" errors caused by guessing coordinates
+                            route = None
+                            try:
+                                route = nx.shortest_path(G_copy, u, v, weight='length')
+                            except nx.NetworkXNoPath:
+                                try:
+                                    route = nx.shortest_path(G_copy, v, u, weight='length')
+                                except nx.NetworkXNoPath:
+                                    pass
+                            
+                            if route is None or len(route) < 2:
+                                st.warning("⚠️ Blocking this road segment completely cuts off the area. No detour possible.")
+                                route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
                             else:
-                                # Plot with Modern OSMnx 2.0+ GeoDataFrames to capture actual road curves
+                                # Plot the detour path
                                 route_gdf = ox.routing.route_to_gdf(G_copy, route)
                                 route_map = route_gdf.explore(
-                                    color="#3b82f6", 
-                                    style_kwds={"weight": 6, "opacity": 0.9}, 
-                                    tiles="cartodbpositron",
+                                    color="red", 
+                                    style_kwds={"weight": 5, "opacity": 0.8}, 
+                                    tiles="OpenStreetMap",
                                     width="100%", 
                                     height="100%"
                                 )
-                        except nx.NetworkXNoPath:
-                            st.warning("⚠️ Blocking this intersection completely cuts off the road. No detour possible.")
-                            route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="cartodbpositron")
+                        except Exception as e:
+                            st.error(f"Routing error: Could not process graph edges.")
+                            route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
                         
-                        folium.Marker(location=(latitude, longitude), popup="ACCIDENT ZONE", icon=folium.Icon(color="red", icon_color="#ffffff", icon="info-sign")).add_to(route_map)
+                        folium.Marker(location=(latitude, longitude), popup="ACCIDENT ZONE", icon=folium.Icon(color="black", icon="info-sign")).add_to(route_map)
                         
                         st_folium(route_map, width=500, height=400, returned_objects=[])
                         st.success("Route mathematically optimized bypassing the incident node.")
@@ -480,3 +500,37 @@ if models_loaded:
                         st.warning(f"Could not render OSM map: {e}")
                 else:
                     st.success("No major diversion required for this incident level.")
+
+# --- Global Static Footer ---
+st.markdown('''
+<style>
+.static-footer {
+    width: 100%;
+    border-top: 1px solid rgba(103, 146, 137, 0.3);
+    padding: 25px 0 10px 0;
+    margin-top: 50px;
+    text-align: center;
+}
+</style>
+
+<div class="static-footer">
+    <div style="display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 6px;">
+        <span style="color: #679289; font-size: 0.95rem;">Built with 🩵 by</span>
+        <span style="color: #F4C095; font-weight: bold; font-size: 1.05rem;">404-logic-found</span>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: center; gap: 32px;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="color: #FFFFFF; font-size: 0.9rem; font-weight: 500;">Shreelekha Adhikary</span>
+            <a href="https://www.linkedin.com/in/shreelekha-adhikary-b4272128a" target="_blank" style="text-decoration: none; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                <img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="14" height="14" alt="LinkedIn" style="vertical-align: middle;">
+            </a>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="color: #FFFFFF; font-size: 0.9rem; font-weight: 500;">Nilanjan De</span>
+            <a href="https://www.linkedin.com/in/nilanjan-de-41651a27b" target="_blank" style="text-decoration: none; transition: transform 0.2s;" onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+                <img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="14" height="14" alt="LinkedIn" style="vertical-align: middle;">
+            </a>
+        </div>
+    </div>
+</div>
+''', unsafe_allow_html=True)

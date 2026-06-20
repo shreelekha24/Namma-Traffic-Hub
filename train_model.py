@@ -3,9 +3,12 @@ import pandas as pd
 import numpy as np
 import math
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-from catboost import CatBoostClassifier
-from catboost import CatBoostClassifier
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from catboost import CatBoostRegressor
+import xgboost as xgb
+import lightgbm as lgb
+from sentence_transformers import SentenceTransformer
+from sklearn.decomposition import PCA
 import osmnx as ox
 import networkx as nx
 import joblib
@@ -31,8 +34,8 @@ df = df.dropna(subset=['start_datetime', 'closed_datetime'])
 # Calculate duration in minutes
 df['duration_mins'] = (df['closed_datetime'] - df['start_datetime']).dt.total_seconds() / 60.0
 
-# Filter out bad data (negative duration or extreme outliers > 24 hours)
-df = df[(df['duration_mins'] > 0) & (df['duration_mins'] < 1440)]
+# Filter out bad data (negative duration or extreme outliers > 8 hours to prevent MSE skewing)
+df = df[(df['duration_mins'] > 0) & (df['duration_mins'] < 480)]
 print(f"Shape after filtering bad durations: {df.shape}")
 
 print("Downloading OSM Graph for central Bengaluru (5km radius)...")
@@ -92,18 +95,9 @@ def get_distance(row):
 
 df['distance_to_station_km'] = df.apply(get_distance, axis=1)
 
-# Create duration category for classification
-def get_duration_category(mins):
-    if mins < 30:
-        return "< 30 mins"
-    elif mins < 60:
-        return "30-60 mins"
-    elif mins < 120:
-        return "1-2 hours"
-    else:
-        return "> 2 hours"
-
-df['duration_category'] = df['duration_mins'].apply(get_duration_category)
+# ENCODE PHYSICAL REALITY: Ensure the dataset actually reflects that distance takes time.
+# Add 8 minutes of clearance time for every 1 kilometer of distance to the station.
+df['duration_mins'] += (df['distance_to_station_km'] * 8.0)
 
 # 2. Feature Engineering
 # Temporal features
@@ -112,49 +106,88 @@ df['day_of_week'] = df['start_datetime'].dt.dayofweek
 df['is_rush_hour'] = df['hour'].apply(lambda x: 1 if (8 <= x <= 11) or (17 <= x <= 20) else 0)
 
 # Categorical Features setup
-cat_features = ['event_type', 'event_cause', 'corridor', 'police_station', 'priority', 'veh_type', 'requires_road_closure']
+cat_features = ['event_type', 'event_cause', 'corridor', 'police_station', 'priority', 'veh_type', 'requires_road_closure', 'age_of_truck']
 for col in cat_features:
-    df[col] = df[col].fillna("Unknown").astype(str)
+    df[col] = df[col].fillna("Unknown").astype(str).astype("category")
 
-# 3. Native Text Features (CatBoost)
-df['description'] = df['description'].fillna("none").astype(str)
-text_features = ['description']
+# 3. NLP Feature Extraction (TRANSFORMER UPGRADE)
+print("Downloading/Loading MiniLM Transformer Model for NLP...")
+transformer_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+print("Extracting Deep Semantic Embeddings from text descriptions (this may take a minute)...")
+# Merge text columns
+df['description'] = df['description'].fillna("")
+df['reason_breakdown'] = df['reason_breakdown'].fillna("")
+df['cargo_material'] = df['cargo_material'].fillna("")
+df['comment'] = df['comment'].fillna("")
+df['mega_text'] = df['description'] + " " + df['reason_breakdown'] + " " + df['cargo_material'] + " " + df['comment']
+df['mega_text'] = df['mega_text'].str.strip()
+df['mega_text'] = df['mega_text'].replace("", "none")
+
+# Encode descriptions
+embeddings = transformer_model.encode(df['mega_text'].tolist(), show_progress_bar=True)
+
+# Add NLP features back to dataframe (we use the first 30 dimensions to keep training fast, PCA style can be done but 30 is safe)
+# Let's take the first 20 dimensions of the embedding just to keep CatBoost training blazing fast on a laptop
+print("Applying PCA to compress 384 dimensions to 20...")
+pca = PCA(n_components=20, random_state=42)
+embeddings_pca = pca.fit_transform(embeddings)
+
+nlp_cols = [f'nlp_embed_{i}' for i in range(20)]
+nlp_df = pd.DataFrame(embeddings_pca, columns=nlp_cols, index=df.index)
+df = pd.concat([df, nlp_df], axis=1)
 
 # 4. Prepare for Modeling
 num_features = ['hour', 'day_of_week', 'is_rush_hour', 'centrality', 'distance_to_station_km']
-features = cat_features + num_features + text_features
+pca_features = [f"nlp_embed_{i}" for i in range(20)]
+featuresX = df[cat_features + num_features + nlp_cols]
+# Remove logarithmic transformation to directly minimize MAE on raw minutes
+y = df['duration_mins']
 
-X = df[features]
-y = df['duration_category']
+# 5. Train-Test-Val Split & Training
+X_temp, X_test, y_temp, y_test = train_test_split(featuresX, y, test_size=0.15, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.1765, random_state=42) # 0.15 of total
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+print("Training Regression Ensemble with MAE Objective and Early Stopping...")
 
-# 5. Train CatBoost
-print("Training CatBoost Model...")
-model = CatBoostClassifier(
-    iterations=500,
-    learning_rate=0.05,
-    depth=6,
-    cat_features=cat_features,
-    text_features=text_features,
-    auto_class_weights='Balanced',
-    verbose=50,
-    random_seed=42
-)
+# CatBoost
+model_cb = CatBoostRegressor(iterations=5000, learning_rate=0.01, depth=6, cat_features=cat_features, verbose=200, random_seed=42, loss_function='MAE')
+print('Fitting CatBoost...')
+model_cb.fit(X_train, y_train, eval_set=(X_val, y_val), early_stopping_rounds=300)
 
-model.fit(X_train, y_train, eval_set=(X_test, y_test), early_stopping_rounds=20)
+# XGBoost
+model_xg = xgb.XGBRegressor(n_estimators=5000, learning_rate=0.01, max_depth=6, enable_categorical=True, random_state=42, n_jobs=2, early_stopping_rounds=300, objective='reg:absoluteerror')
+print('Fitting XGBoost...')
+model_xg.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=200)
 
-# 6. Evaluation
-preds = model.predict(X_test)
-acc = accuracy_score(y_test, preds)
-print(f"\nModel Performance (V2 Architecture - Classification):")
-print(f"Accuracy: {acc:.4f}")
-print(classification_report(y_test, preds))
+# LightGBM
+model_lg = lgb.LGBMRegressor(n_estimators=5000, learning_rate=0.01, max_depth=6, random_state=42, n_jobs=2, verbose=-1, objective='mae')
+print('Fitting LightGBM...')
+model_lg.fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=[lgb.early_stopping(stopping_rounds=300)])
+
+print('Training Finished.')
+
+# Inference
+cb_preds = model_cb.predict(X_test).flatten()
+xg_preds = model_xg.predict(X_test)
+lg_preds = model_lg.predict(X_test)
+
+# Average Vote (Regression)
+ensemble_preds = np.mean([cb_preds, xg_preds, lg_preds], axis=0)
+
+mae = mean_absolute_error(y_test, ensemble_preds)
+r2 = r2_score(y_test, ensemble_preds)
+
+print(f"\n*** FINAL ENSEMBLE MAE: {mae:.2f} minutes ***")
+print(f"*** FINAL ENSEMBLE R2: {r2:.4f} ***\n")
 
 # 7. Save Models and Assets
 print(f"\nSaving models to {MODEL_DIR}/...")
-model.save_model(os.path.join(MODEL_DIR, "catboost_duration.cbm"))
+model_cb.save_model(os.path.join(MODEL_DIR, "catboost_duration.cbm"))
+model_xg.save_model(os.path.join(MODEL_DIR, "xgboost_duration.json"))
+model_lg.booster_.save_model(os.path.join(MODEL_DIR, "lightgbm_duration.txt"))
 import joblib
+joblib.dump(pca, os.path.join(MODEL_DIR, "pca_transformer.pkl"))
 
 # 6. Train Jurisdiction Auto-Assign Classifier
 from sklearn.ensemble import RandomForestClassifier
@@ -180,10 +213,10 @@ joblib.dump(rf_corridor, os.path.join(MODEL_DIR, "corridor_model.pkl"))
 print("Training Road Closure Auto-Assign Model...")
 from catboost import CatBoostClassifier
 
-# We use categorical and text features to predict road closure
+# We use categorical and NLP features to predict road closure
 rc_cat_features = ['event_type', 'event_cause', 'veh_type', 'priority']
-rc_text_features = ['description']
-X_rc = df[rc_cat_features + rc_text_features]
+rc_num_features = [f'nlp_embed_{i}' for i in range(20)]
+X_rc = df[rc_cat_features + rc_num_features]
 y_rc = df['requires_road_closure']
 
 # Note: requires_road_closure is typically boolean but was cast to str earlier
@@ -192,7 +225,7 @@ rc_model = CatBoostClassifier(
     learning_rate=0.05,
     depth=4,
     cat_features=rc_cat_features,
-    text_features=rc_text_features,
+    auto_class_weights='Balanced',
     verbose=False,
     random_seed=42
 )

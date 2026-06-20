@@ -12,11 +12,9 @@
         "procession",
         "protest",
         "road_conditions",
-        "sports_event",
         "test_demo",
         "tree_fall",
         "vehicle_breakdown",
-        "vip_movement",
         "water_logging"
     ],
     "corridor": [
