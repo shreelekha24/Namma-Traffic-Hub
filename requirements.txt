@@ -4,6 +4,8 @@ numpy
 networkx
 osmnx>=2.0.0
 folium
+matplotlib
+mapclassify
 streamlit-folium
 joblib
 scikit-learn
