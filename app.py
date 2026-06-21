@@ -457,16 +457,10 @@ if models_loaded:
                             nearest_edge = ox.distance.nearest_edges(G_copy, longitude, latitude)
                             u, v, key = nearest_edge
                             
-                            # 2. Block the road by removing ALL lanes/edges from our mathematical graph
-                            # We use a try-except block to aggressively delete any parallel edges
-                            if G_copy.has_edge(u, v):
-                                keys = list(G_copy[u][v].keys())
-                                for k in keys:
-                                    G_copy.remove_edge(u, v, k)
-                            if G_copy.has_edge(v, u):
-                                keys = list(G_copy[v][u].keys())
-                                for k in keys:
-                                    G_copy.remove_edge(v, u, k)
+                            # 2. Block the road by removing it from our mathematical graph
+                            G_copy.remove_edge(u, v, key)
+                            if G_copy.has_edge(v, u, key):
+                                G_copy.remove_edge(v, u, key)
                                 
                             # 3. Calculate Detour topologically
                             # Respect the "Impacted Traffic Flow" direction selected in the UI
