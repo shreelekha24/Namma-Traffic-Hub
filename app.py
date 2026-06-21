@@ -462,14 +462,29 @@ if models_loaded:
                             if G_copy.has_edge(v, u, key):
                                 G_copy.remove_edge(v, u, key)
                                 
-                            # 3. Calculate Detour topologically (from u to v through the rest of the city)
-                            # This completely avoids "off map" errors caused by guessing coordinates
+                            # 3. Calculate Detour topologically
+                            # Respect the "Impacted Traffic Flow" direction selected in the UI
+                            node_u = G.nodes[u]
+                            node_v = G.nodes[v]
+                            
+                            start_node, end_node = u, v
+                            
+                            if "South ➡️ North" in traffic_direction:
+                                if node_u['y'] > node_v['y']: start_node, end_node = v, u
+                            elif "North ➡️ South" in traffic_direction:
+                                if node_u['y'] < node_v['y']: start_node, end_node = v, u
+                            elif "West ➡️ East" in traffic_direction:
+                                if node_u['x'] > node_v['x']: start_node, end_node = v, u
+                            elif "East ➡️ West" in traffic_direction:
+                                if node_u['x'] < node_v['x']: start_node, end_node = v, u
+                                
                             route = None
                             try:
-                                route = nx.shortest_path(G_copy, u, v, weight='length')
+                                route = nx.shortest_path(G_copy, start_node, end_node, weight='length')
                             except nx.NetworkXNoPath:
+                                # Fallback if strict one-way street constraints block the preferred flow
                                 try:
-                                    route = nx.shortest_path(G_copy, v, u, weight='length')
+                                    route = nx.shortest_path(G_copy, end_node, start_node, weight='length')
                                 except nx.NetworkXNoPath:
                                     pass
                             
