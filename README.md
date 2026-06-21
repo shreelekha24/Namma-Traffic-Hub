@@ -1,52 +1,78 @@
-# 🚔 Astram Command Center (Team 404 Logic Found)
+# 🚦 Namma Traffic Hub
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-red.svg)
-![CatBoost](https://img.shields.io/badge/CatBoost-1.2.5-yellow.svg)
-![Transformers](https://img.shields.io/badge/Transformers-HuggingFace-orange.svg)
-![PuLP](https://img.shields.io/badge/PuLP-MILP_Optimization-green.svg)
-
-An AI-driven incident management dashboard designed to forecast event-driven traffic congestion and mathematically optimize police resource deployment.
-
-## 🏆 Hackathon Project Highlights
-
-1. **Spatial-Graph Engine (OpenStreetMap):** Dynamically calculates shortest-path diversion routes around blocked intersections using `OSMnx` and renders interactive maps with `Folium`.
-2. **Deep Learning NLP:** Replaced basic keyword extraction with a HuggingFace Sentence Transformer (`all-MiniLM-L6-v2`) to extract semantic severity from mixed Kannada/English dispatch descriptions.
-3. **Forecasting Engine:** Utilizes `CatBoostRegressor` to predict exact clearance durations, natively handling high-cardinality location data without massive one-hot encoding.
-4. **Operations Research (Optimization):** Employs `PuLP` (Mixed-Integer Linear Programming) to replace heuristic rules, mathematically ensuring the optimal deployment of Traffic Police, Barricades, and Tow Trucks under budget constraints.
+**An AI-Powered Dynamic Congestion Management & Resource Allocation Engine**  
+*Built for the Modern City.*
 
 ---
 
-## 🛠️ System Architecture
+## 📖 Overview
 
-```mermaid
-graph TD;
-    A[Dispatch Input] --> B(CatBoost Forecasting Model);
-    A --> C(Transformer NLP Engine);
-    C --> B;
-    B --> D(PuLP MILP Optimizer);
-    A --> E(OSMnx Spatial Graph Routing);
-    D --> F[Tactical Deployment Plan];
-    E --> G[Interactive Diversion Map];
-    F --> H{Streamlit Dashboard};
-    G --> H;
-```
+Current city traffic management relies on static maps, heuristics, and manual estimations. When an accident or blockage occurs, GPS systems often route vehicles into secondary bottlenecks, and emergency resources (police, tow trucks) are dispatched based on guesswork, leading to delayed response times and resource depletion.
 
-## 🚀 Local Setup Instructions
+**Namma Traffic Hub** replaces guesswork with mathematics. We built a fully autonomous mitigation engine consisting of a **3-Tier Artificial Intelligence Architecture** to predict incident clearance times, dispatch resources optimally, and calculate the absolute shortest valid topological detour.
 
-1. **Clone the repository and enter the directory:**
+---
+
+## ✨ Key Innovations & Architecture
+
+### 1. Topological Spatial Routing (Dynamic Graph Detours)
+We loaded the entire city street network as a mathematical graph (nodes and edges) using **OSMnx** and **NetworkX**. 
+When an incident triggers a road closure, our algorithm physically deletes that specific street edge from the graph in real-time. This forces the system to calculate the absolute shortest valid path *around* the blockage using side streets, completely avoiding "off-map" errors and guaranteeing a valid topological detour.
+
+### 2. ML Forecasting Ensemble (Clearance Prediction)
+To accurately predict exactly how many minutes an incident will take to clear, we deployed an advanced Ensemble architecture utilizing three state-of-the-art tree-based algorithms: **CatBoost, XGBoost, and LightGBM**. 
+Our model dynamically distinguishes between planned events (VIP movements, construction) and unplanned events (spontaneous accidents) to adjust clearance predictions with mathematical precision.
+* **Accuracy Achieved:** Final Ensemble MAE of just **34.8 Minutes** on volatile city traffic data.
+
+### 3. NLP Semantic Embedding Engine (Deterministic Overrides)
+Operators input unstructured text (e.g., *"The road is completely blocked by falling live electric wires"*). We implemented a deep-learning `SentenceTransformer` that converts English text into a mathematical semantic vector, compressed via PCA. If the system detects catastrophic hazards, it overrides standard ML predictions and forcefully triggers emergency protocols.
+
+### 4. MILP Resource Optimizer (Mathematical Dispatch)
+Using Mixed-Integer Linear Programming (`PuLP`), the system automatically classifies incidents and maps them to their exact legal jurisdiction boundaries. It calculates Haversine spatial distances to nearby police stations and mathematically guarantees the fastest emergency response times while ensuring critical stations retain reserve resources.
+
+---
+
+## ⚙️ Tech Stack
+
+* **Frontend/UI:** Streamlit, Folium
+* **Routing Algorithms:** OSMnx, NetworkX
+* **Machine Learning:** CatBoost, XGBoost, LightGBM, Scikit-Learn
+* **Natural Language Processing:** SentenceTransformers, PCA
+* **Mathematical Optimization:** PuLP (Mixed-Integer Linear Programming)
+* **Data Processing:** Pandas, NumPy, Geopy
+
+---
+
+## 🚀 How to Run Locally
+
+1. **Clone the repository:**
    ```bash
-   cd Round-2-Event-Congestion
+   git clone https://github.com/shreelekha24/Namma-Traffic-Hub.git
+   cd Namma-Traffic-Hub
    ```
-2. **Install dependencies:**
+
+2. **Install Dependencies:**
+   Ensure you have Python installed, then run:
    ```bash
    pip install -r requirements.txt
    ```
-3. **Train the Models:** (This downloads the OSM map data and Transformer weights)
-   ```bash
-   python train_model.py
-   ```
-4. **Launch the Command Center:**
+
+3. **Run the Dashboard:**
    ```bash
    streamlit run app.py
    ```
+   *The interactive dashboard will automatically open in your default web browser.*
+
+---
+
+## 📊 Evaluation Pipeline
+If you wish to test the accuracy of the predictive models on the dataset:
+```bash
+python evaluate.py
+```
+*This will execute the master evaluation pipeline, replicating feature engineering and testing the ensemble models against the test dataset to print the MAE report card.*
+
+---
+
+**Team:** 404-logic-found  
+*Replacing guesswork with mathematics to save time, resources, and lives.*
