@@ -903,9 +903,10 @@ if st.session_state.step1_complete:
                         if pd.isna(hosp_name):
                             hosp_name = "Nearest Hospital"
                             
+                        # Find hospital node BEFORE injecting string-based virtual node to prevent OSMnx int casting crash
+                        hosp_node = ox.distance.nearest_nodes(G, hosp_lon, hosp_lat)
                         # Inject virtual node for precise incident routing
                         incident_node = inject_virtual_node(G, incident_lat, incident_lon, "V_INCIDENT")
-                        hosp_node = ox.distance.nearest_nodes(G, hosp_lon, hosp_lat)
                         
                         try:
                             amb_route = nx.shortest_path(G, hosp_node, incident_node, weight='length')
