@@ -12,6 +12,9 @@ import osmnx as ox
 import networkx as nx
 import folium
 from streamlit_folium import st_folium
+from shapely.geometry import LineString, Point
+from shapely.ops import substring
+import numpy as np
 
 # --- Page Config ---
 st.set_page_config(page_title="Namma Traffic Hub", page_icon="🚔", layout="wide")
@@ -59,6 +62,49 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
     c = 2 * math.asin(math.sqrt(a))
     return R * c
+
+def inject_virtual_node(G, lat, lon, node_id):
+    """Injects a mathematical node into the OSMnx graph at the exact Lat/Lon by splitting the nearest edge."""
+    # Find nearest edge
+    u, v, key = ox.distance.nearest_edges(G, lon, lat)
+    
+    # Add new node
+    G.add_node(node_id, y=lat, x=lon)
+    
+    # Calculate distances to u and v in meters
+    dist_u = haversine(lat, lon, G.nodes[u]['y'], G.nodes[u]['x']) * 1000
+    dist_v = haversine(lat, lon, G.nodes[v]['y'], G.nodes[v]['x']) * 1000
+    
+    # Get original edge geometry to maintain curvature
+    edge_data = G.get_edge_data(u, v, key)
+    if 'geometry' in edge_data:
+        geom = edge_data['geometry']
+    else:
+        geom = LineString([(G.nodes[u]['x'], G.nodes[u]['y']), (G.nodes[v]['x'], G.nodes[v]['y'])])
+        
+    # Project point onto the LineString to split it
+    point = Point(lon, lat)
+    dist_along = geom.project(point)
+    
+    geom_u_to_v_start = substring(geom, 0, dist_along)
+    geom_v_start_to_v = substring(geom, dist_along, geom.length)
+    
+    # Fallback if substring fails (rare)
+    if geom_u_to_v_start.geom_type != 'LineString':
+        geom_u_to_v_start = LineString([(G.nodes[u]['x'], G.nodes[u]['y']), (lon, lat)])
+    if geom_v_start_to_v.geom_type != 'LineString':
+        geom_v_start_to_v = LineString([(lon, lat), (G.nodes[v]['x'], G.nodes[v]['y'])])
+    
+    # Connect the virtual node to the rest of the graph
+    if G.has_edge(u, v):
+        G.add_edge(node_id, v, length=dist_v, geometry=geom_v_start_to_v)
+        G.add_edge(u, node_id, length=dist_u, geometry=geom_u_to_v_start)
+    
+    if G.has_edge(v, u):
+        G.add_edge(node_id, u, length=dist_u, geometry=geom_u_to_v_start)
+        G.add_edge(v, node_id, length=dist_v, geometry=geom_v_start_to_v)
+        
+    return node_id
 
 try:
     model, transformer_model, pca, options, station_coords, jurisdiction_model, corridor_model, rc_model = load_assets()
@@ -182,15 +228,32 @@ if models_loaded:
         st.sidebar.markdown("---")
     st.sidebar.subheader("Location")
     
-    # Initialize session state for location
+    # Initialize session state for location and 2-step routing
     if "marker_lat" not in st.session_state:
         st.session_state.marker_lat = 12.9716
         st.session_state.marker_lon = 77.5946
     if "last_query" not in st.session_state:
         st.session_state.last_query = "Bengaluru"
+    if "step1_complete" not in st.session_state:
+        st.session_state.step1_complete = False
+    if "impacted_edge" not in st.session_state:
+        st.session_state.impacted_edge = None
+    if "remaining_width" not in st.session_state:
+        st.session_state.remaining_width = None
+    if "max_continuous_gap" not in st.session_state:
+        st.session_state.max_continuous_gap = None
+    if "step1_results" not in st.session_state:
+        st.session_state.step1_results = {}
+    if "route_start" not in st.session_state:
+        st.session_state.route_start = None
+    if "route_end" not in st.session_state:
+        st.session_state.route_end = None
         
     # 1. Text Search to center the map
     address_query = st.sidebar.text_input("🔍 Search Landmark (Press Enter to center map)", st.session_state.last_query)
+    
+    st.sidebar.markdown("---")
+    incident_radius = st.sidebar.slider("Impact Radius (Meters)", min_value=1, max_value=20, value=5)
     
     # Update marker to searched location if search query changed
     if address_query != st.session_state.last_query:
@@ -209,6 +272,16 @@ if models_loaded:
         [st.session_state.marker_lat, st.session_state.marker_lon], 
         icon=folium.Icon(color="red", icon="info-sign"),
         tooltip="Incident Location"
+    ).add_to(m)
+    
+    # Add a transparent circle representing the impact radius
+    folium.Circle(
+        location=[st.session_state.marker_lat, st.session_state.marker_lon],
+        radius=incident_radius,
+        color='red',
+        fill=True,
+        fill_color='red',
+        fill_opacity=0.4
     ).add_to(m)
     
     # Create Dashboard Layout
@@ -284,8 +357,7 @@ if models_loaded:
             assigned_police_station = jurisdiction_model.predict(auto_spatial_df)[0]
             assigned_corridor = corridor_model.predict(auto_spatial_df)[0]
             
-            st.success(f"🤖 **Auto-Assigned Jurisdiction:** {assigned_police_station} Traffic Police Station")
-            st.success(f"🤖 **Auto-Assigned Corridor:** {assigned_corridor}")
+            # Save to state later
             
             # 1. Temporal Features
             hour = time_of_event.hour
@@ -345,23 +417,59 @@ if models_loaded:
             elif override_triggered:
                 requires_road_closure = True
                     
-            if requires_road_closure:
-                if force_road_closure:
-                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Forced by Manual Override Checkbox)")
-                elif override_triggered:
-                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Forced by critical keywords in description)")
-                else:
-                    st.error("🚧 **Auto-Predicted Road Closure:** YES (Full Blockage)")
-            else:
-                st.success("✅ **Auto-Predicted Road Closure:** NO (Partial/No Blockage)")
-            
-            # 3. Graph Features
+            # 3. Graph Features & Capacity
             G = get_city_graph()
             try:
                 nearest_node = ox.distance.nearest_nodes(G, longitude, latitude)
                 centrality = G.nodes[nearest_node].get('centrality', 0.0)
-            except Exception:
+                
+                nearest_edge = ox.distance.nearest_edges(G, longitude, latitude)
+                u, v, key = nearest_edge
+                edge_data = G.get_edge_data(u, v, key)
+                highway_type = edge_data.get('highway', 'unclassified')
+                if isinstance(highway_type, list): highway_type = highway_type[0]
+                
+                width_map = {
+                    'trunk': 12, 'primary': 10, 'secondary': 8,
+                    'tertiary': 6, 'residential': 4, 'unclassified': 5
+                }
+                total_road_width = width_map.get(highway_type, 5)
+                blockage_diameter = incident_radius * 2
+                remaining_width = total_road_width - blockage_diameter
+                max_continuous_gap = remaining_width / 2 if remaining_width > 0 else 0
+                
+                st.session_state.impacted_edge = nearest_edge
+            except Exception as e:
                 centrality = 0.0
+                highway_type = "unknown"
+                total_road_width = 5
+                blockage_diameter = incident_radius * 2
+                max_continuous_gap = 0
+                st.session_state.impacted_edge = None
+
+            # --- SYNC PREDICTIVE LOGIC WITH SPATIAL LOGIC ---
+            force_spatial_closure = False
+            if max_continuous_gap <= 0:
+                requires_road_closure = True
+                requires_road_closure_str = "Yes"
+                force_spatial_closure = True
+            elif requires_road_closure:
+                # ML/Override forced closure, so we must mathematically eliminate the gap for the routing engine
+                max_continuous_gap = 0
+                
+            st.session_state.max_continuous_gap = max_continuous_gap
+            
+            if requires_road_closure:
+                if force_spatial_closure:
+                    closure_status = "🚧 **Auto-Predicted Road Closure:** YES (Forced by Spatial Capacity - 0m Gap)"
+                elif force_road_closure:
+                    closure_status = "🚧 **Auto-Predicted Road Closure:** YES (Forced by Manual Override Checkbox)"
+                elif override_triggered:
+                    closure_status = "🚧 **Auto-Predicted Road Closure:** YES (Forced by critical keywords in description)"
+                else:
+                    closure_status = "🚧 **Auto-Predicted Road Closure:** YES (Full Blockage predicted by model)"
+            else:
+                closure_status = "✅ **Auto-Predicted Road Closure:** NO (Partial/No Blockage)"
 
             # 4. Station Distance
             dist_km = 5.0
@@ -370,7 +478,7 @@ if models_loaded:
                 s_lon = station_coords[assigned_police_station]['lon']
                 dist_km = haversine(latitude, longitude, s_lat, s_lon)
             
-            # 3. Build Input Vector matching training features
+            # 5. Build Input Vector matching training features
             input_dict = {
                 'event_type': event_type,
                 'event_cause': event_cause,
@@ -392,9 +500,9 @@ if models_loaded:
                 
             input_df = pd.DataFrame([input_dict])
             
-            # 4. Predict
+            # 6. Predict Duration
             pred_duration = model.predict(input_df)[0]
-            pred_duration = max(1.0, pred_duration) # Prevent negative predictions
+            pred_duration = max(1.0, pred_duration)
             
             if event_type == "planned" and specify_end:
                 from datetime import datetime, date
@@ -403,97 +511,197 @@ if models_loaded:
                 diff = (t2 - t1).total_seconds() / 60.0
                 if diff < 0:
                     diff += 24 * 60
-                # Use the manual planned duration if it's longer than what the ML model predicts
                 pred_duration = max(pred_duration, diff)
             
-            # 5. Generate Recommendations using PuLP
+            # 7. Generate Recommendations using PuLP
             recs = generate_recommendations(pred_duration, event_type, event_cause, requires_road_closure, crowd_size=crowd_size, desc_text=desc_text)
+
+            # Cache everything to session state
+            st.session_state.step1_results = {
+                'assigned_police_station': assigned_police_station,
+                'assigned_corridor': assigned_corridor,
+                'closure_status': closure_status,
+                'pred_duration': pred_duration,
+                'recs': recs,
+                'highway_type': highway_type,
+                'total_road_width': total_road_width,
+                'blockage_diameter': blockage_diameter,
+                'max_continuous_gap': max_continuous_gap
+            }
+            st.session_state.step1_complete = True
+
+# --- Step 1 UI Rendering (Decoupled from Button) ---
+if st.session_state.step1_complete:
+    results = st.session_state.step1_results
+    
+    st.success(f"🤖 **Auto-Assigned Jurisdiction:** {results['assigned_police_station']} Traffic Police Station")
+    st.success(f"🤖 **Auto-Assigned Corridor:** {results['assigned_corridor']}")
+    if "YES" in results['closure_status']:
+        st.error(results['closure_status'])
+    else:
+        st.success(results['closure_status'])
+        
+    st.divider()
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("⏱️ Forecasting Engine")
+        st.metric(label="Predicted Clearance Time", value=f"{int(results['pred_duration'])} mins")
+        
+        if results['recs']['priority_alert'] == "High":
+            st.error("CRITICAL: High Impact Incident")
+        elif results['recs']['priority_alert'] == "Medium":
+            st.warning("WARNING: Moderate Impact Incident")
+        else:
+            st.success("INFO: Low Impact Incident")
             
-            # --- Display Results ---
-            st.divider()
+        st.subheader("👮‍♂️ MILP Tactical Deployment")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Traffic Cops Required", results['recs']['police_required'])
+        m2.metric("Barricades Required", results['recs']['barricades'])
+        m3.metric("Tow Trucks Required", results['recs']['tow_trucks'])
+        
+        st.markdown("### 📋 Action Plan")
+        for action in results['recs']['action_plan']:
+            st.markdown(f"- {action}")
             
-            col1, col2 = st.columns([1, 1])
+    with col2:
+        st.subheader("🛣️ Dynamic Capacity Assessment")
+        st.write(f"**Impacted Road Type:** `{results['highway_type']}`")
+        st.write(f"**Estimated Total Width:** `{results['total_road_width']}m`")
+        st.write(f"**Blockage Diameter:** `{results['blockage_diameter']}m` (Radius x 2)")
+        st.write(f"**Max Continuous Gap:** `{max(0, results['max_continuous_gap']):.1f}m` (Assuming center impact)")
+        
+        if results['max_continuous_gap'] <= 0:
+            st.error("🚨 Full Blockage. 0m clearance. Edge legally closed.")
+        else:
+            st.warning("🚧 Partial Blockage. Route constrained by vehicle width vs gap.")
+
+# --- Step 2: Intelligent Routing Engine ---
+if st.session_state.step1_complete:
+    st.divider()
+    st.markdown("## 📍 Step 2: Intelligent Routing Engine")
+    
+    route_col1, route_col2 = st.columns([1, 2])
+    
+    with route_col1:
+        st.info("Click the map to set your Start (A) and End (B) coordinates. The detour will calculate automatically.")
+        
+        # Initialize Step 2 Map Center
+        if "step2_map_center" not in st.session_state:
+            st.session_state.step2_map_center = [st.session_state.marker_lat, st.session_state.marker_lon]
             
-            with col1:
-                st.subheader("⏱️ Forecasting Engine")
-                st.metric(label="Predicted Clearance Time", value=f"{int(pred_duration)} mins")
+        step2_m = folium.Map(location=st.session_state.step2_map_center, zoom_start=14)
+        
+        # Add Incident Area
+        folium.Marker(
+            [st.session_state.marker_lat, st.session_state.marker_lon], 
+            icon=folium.Icon(color="red", icon="warning-sign"),
+            tooltip="Incident Zone"
+        ).add_to(step2_m)
+        folium.Circle(
+            location=[st.session_state.marker_lat, st.session_state.marker_lon],
+            radius=incident_radius,
+            color='red', fill=True, fill_opacity=0.4
+        ).add_to(step2_m)
+        
+        # Add selected start/end points
+        if st.session_state.route_start:
+            folium.Marker(st.session_state.route_start, icon=folium.Icon(color="green", icon="play"), tooltip="Start").add_to(step2_m)
+        if st.session_state.route_end:
+            folium.Marker(st.session_state.route_end, icon=folium.Icon(color="black", icon="stop"), tooltip="End").add_to(step2_m)
+            
+        # Render map and catch clicks
+        map_data = st_folium(step2_m, width=350, height=350, returned_objects=["last_clicked"])
+        
+        if map_data and map_data.get("last_clicked"):
+            lat = map_data["last_clicked"]["lat"]
+            lon = map_data["last_clicked"]["lng"]
+            coord = (lat, lon)
+            
+            if st.session_state.get("last_click_coord") != coord:
+                st.session_state.last_click_coord = coord
+                if not st.session_state.route_start:
+                    st.session_state.route_start = [lat, lon]
+                    st.rerun()
+                elif not st.session_state.route_end:
+                    st.session_state.route_end = [lat, lon]
+                    st.rerun()
                 
-                if recs['priority_alert'] == "High":
-                    st.error("CRITICAL: High Impact Incident")
-                elif recs['priority_alert'] == "Medium":
-                    st.warning("WARNING: Moderate Impact Incident")
-                else:
-                    st.success("INFO: Low Impact Incident")
+        if st.button("🔄 Clear Route Points"):
+            st.session_state.route_start = None
+            st.session_state.route_end = None
+            st.session_state.last_click_coord = None
+            st.rerun()
+            
+        vehicle_type = st.selectbox("Vehicle Classification", ["2-Wheeler", "Car", "Heavy Truck"])
+        vehicle_width_map = {"2-Wheeler": 1.0, "Car": 2.5, "Heavy Truck": 4.0}
+        required_width = vehicle_width_map[vehicle_type]
+        
+    with route_col2:
+        if not st.session_state.route_start:
+            st.warning("⚠️ Waiting for Start Point... (Click Map)")
+        elif not st.session_state.route_end:
+            st.warning("⚠️ Waiting for End Point... (Click Map)")
+        else:
+            # Both points acquired. Auto-Calculate.
+            start_lat, start_lon = st.session_state.route_start
+            end_lat, end_lon = st.session_state.route_end
+            
+            st.success("Points Acquired! Calculating intelligent detour...")
+            with st.spinner(f"Evaluating graph constraints for {vehicle_type}..."):
+                try:
+                    G = get_city_graph()
+                    G_route = G.copy()
                     
-                st.subheader("👮‍♂️ MILP Tactical Deployment")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Traffic Cops Required", recs['police_required'])
-                m2.metric("Barricades Required", recs['barricades'])
-                m3.metric("Tow Trucks Required", recs['tow_trucks'])
-                
-                st.markdown("### 📋 Action Plan")
-                for action in recs['action_plan']:
-                    st.markdown(f"- {action}")
+                    # Retrieve Step 1 capacity data
+                    u, v, key = st.session_state.impacted_edge
+                    max_continuous_gap = st.session_state.max_continuous_gap
                     
-            with col2:
-                st.subheader("🗺️ Spatial-Graph Diversion Engine")
-                if recs['diversion_advised']:
-                    st.info("Calculating optimal diversion using OpenStreetMap Graph...")
+                    detour_triggered = False
+                    if max_continuous_gap < required_width:
+                        # Vehicle is too wide to pass safely. Cut the edge from the graph.
+                        G_route.remove_edge(u, v, key)
+                        if G_route.has_edge(v, u, key):
+                            G_route.remove_edge(v, u, key)
+                        detour_triggered = True
+                        st.error(f"🚨 **Constraint Failed:** {vehicle_type} requires {required_width}m. Only {max(0, max_continuous_gap):.1f}m gap available. Forcing mathematical detour.")
+                    else:
+                        st.success(f"✅ **Constraint Passed:** {vehicle_type} requires {required_width}m. {max_continuous_gap:.1f}m gap available. Proceeding directly through impacted zone.")
                     
+                    # Inject Virtual Nodes directly into the routing graph
+                    start_node = inject_virtual_node(G_route, start_lat, start_lon, "V_START")
+                    end_node = inject_virtual_node(G_route, end_lat, end_lon, "V_END")
+                    
+                    # Calculate Absolute Shortest Topological Path
+                    route = None
                     try:
-                        G = get_city_graph()
-                        
-                        # True Graph Routing: Block the impacted area
-                        G_copy = G.copy()
-                        
-                        # 1. Identify the impacted physical road segment (edge u -> v)
-                        try:
-                            nearest_edge = ox.distance.nearest_edges(G_copy, longitude, latitude)
-                            u, v, key = nearest_edge
-                            
-                            # 2. Block the road by removing it from our mathematical graph
-                            G_copy.remove_edge(u, v, key)
-                            if G_copy.has_edge(v, u, key):
-                                G_copy.remove_edge(v, u, key)
-                                
-                            # 3. Calculate Detour topologically (from u to v through the rest of the city)
-                            # This completely avoids "off map" errors caused by guessing coordinates
-                            route = None
-                            try:
-                                route = nx.shortest_path(G_copy, u, v, weight='length')
-                            except nx.NetworkXNoPath:
-                                try:
-                                    route = nx.shortest_path(G_copy, v, u, weight='length')
-                                except nx.NetworkXNoPath:
-                                    pass
-                            
-                            if route is None or len(route) < 2:
-                                st.warning("⚠️ Blocking this road segment completely cuts off the area. No detour possible.")
-                                route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
-                            else:
-                                # Plot the detour path
-                                route_gdf = ox.routing.route_to_gdf(G_copy, route)
-                                route_map = route_gdf.explore(
-                                    color="red", 
-                                    style_kwds={"weight": 5, "opacity": 0.8}, 
-                                    tiles="OpenStreetMap",
-                                    width="100%", 
-                                    height="100%"
-                                )
-                        except Exception as e:
-                            st.error(f"Routing error: Could not process graph edges. Details: {str(e)}")
-                            route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
-                        
-                        folium.Marker(location=(latitude, longitude), popup="ACCIDENT ZONE", icon=folium.Icon(color="black", icon="info-sign")).add_to(route_map)
-                        
-                        st_folium(route_map, width=500, height=400, returned_objects=[])
-                        st.success("Route mathematically optimized bypassing the incident node.")
+                        route = nx.shortest_path(G_route, start_node, end_node, weight='length')
                     except nx.NetworkXNoPath:
-                        st.error("No valid diversion path found around the incident.")
-                    except Exception as e:
-                        st.warning(f"Could not render OSM map: {e}")
-                else:
-                    st.success("No major diversion required for this incident level.")
+                        pass
+                            
+                    if route is None or len(route) < 2:
+                        st.error("🚫 **Routing Failed:** Blocking this route makes this movement impossible under current vehicle constraints. No alternative mathematical path exists.")
+                    else:
+                        # Render the Map
+                        route_gdf = ox.routing.route_to_gdf(G_route, route)
+                        route_map = route_gdf.explore(
+                            color="blue", style_kwds={"weight": 5, "opacity": 0.8}, 
+                            tiles="OpenStreetMap", width="100%", height="100%"
+                        )
+                        
+                        # Add Interactive Markers
+                        folium.Marker(
+                            location=[st.session_state.marker_lat, st.session_state.marker_lon], 
+                            popup="INCIDENT ZONE", icon=folium.Icon(color="red", icon="warning-sign")
+                        ).add_to(route_map)
+                        folium.Marker([start_lat, start_lon], tooltip="Origin", icon=folium.Icon(color="green", icon="play")).add_to(route_map)
+                        folium.Marker([end_lat, end_lon], tooltip="Destination", icon=folium.Icon(color="black", icon="stop")).add_to(route_map)
+                        
+                        st_folium(route_map, width=700, height=450, returned_objects=[])
+                        
+                except Exception as e:
+                    st.error(f"Routing computation failed. Ensure coordinates are valid. Details: {e}")
 
 # --- Global Static Footer ---
 st.markdown('''
