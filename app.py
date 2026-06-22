@@ -19,6 +19,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from PIL import Image
 import re
+import urllib.parse
 
 load_dotenv(override=True)
 
@@ -606,9 +607,8 @@ PRIORITY: <string>"""
                 pred_duration = max(pred_duration, diff)
             
             # 7. Generate Recommendations using PuLP
-            recs = generate_recommendations(pred_duration, event_type, event_cause, requires_road_closure, crowd_size=crowd_size, desc_text=desc_text)
+            recs = generate_recommendations(pred_duration, event_type, event_cause, requires_road_closure, crowd_size=crowd_size, desc_text=desc_text, corridor=assigned_corridor)
 
-            # Cache everything to session state
             st.session_state.step1_results = {
                 'assigned_police_station': assigned_police_station,
                 'assigned_corridor': assigned_corridor,
@@ -618,7 +618,9 @@ PRIORITY: <string>"""
                 'highway_type': highway_type,
                 'total_road_width': total_road_width,
                 'blockage_diameter': blockage_diameter,
-                'max_continuous_gap': max_continuous_gap
+                'max_continuous_gap': max_continuous_gap,
+                'desc_text': desc_text,
+                'event_cause': event_cause
             }
             st.session_state.step1_complete = True
             
@@ -672,132 +674,271 @@ if st.session_state.step1_complete:
             st.error("🚨 Full Blockage. 0m clearance. Edge legally closed.")
         else:
             st.warning("🚧 Partial Blockage. Route constrained by vehicle width vs gap.")
+            
+    st.divider()
+    st.markdown("### 📡 BTP Communication Control Center")
+    st.info("Auto-generated alerts for Public and Logistics broadcast based on the ML prediction and graph topology.")
+    
+    comm_col1, comm_col2 = st.columns(2)
+    
+    # Text Generation
+    corridor_name = results['assigned_corridor']
+    duration_mins = int(results['pred_duration'])
+    
+    event_cause = results.get('event_cause', '').lower()
+    desc_text = results.get('desc_text', '').strip()
+    
+    # Clean up the cause for the tweet
+    if "rally" in desc_text.lower() or "procession" in desc_text.lower():
+        clean_cause = "a procession/rally"
+        if len(desc_text.split()) <= 6 and desc_text:
+            clean_cause = desc_text
+    elif event_cause == "accident":
+        clean_cause = "an accident"
+    elif event_cause == "waterlogging":
+        clean_cause = "severe waterlogging"
+    elif event_cause == "vehicle breakdown":
+        clean_cause = "a vehicle breakdown"
+    elif "tree" in desc_text.lower() and "fall" in desc_text.lower():
+        clean_cause = "a fallen tree"
+    else:
+        clean_cause = "an incident"
+    
+    # Official X (Twitter) Alert
+    tweet_text = f"‘Traffic advisory’\nMovement of vehicles is slow at {corridor_name} due to {clean_cause}. Traffic is being diverted. Expected clearance in {duration_mins} mins. Kindly cooperate / take alternate route.\n#BengaluruTraffic #BTP"
+    tweet_url = f"https://twitter.com/intent/tweet?text={urllib.parse.quote(tweet_text)}"
+    
+    # FM Radio Script
+    radio_script = f"Attention Bengaluru commuters. BTP advises a major diversion on {corridor_name} due to {clean_cause}. Please take alternate routes. The area will be cleared in approximately {duration_mins} minutes. Drive safely."
+    
+    # Logistics API Payload
+    logistics_payload = {
+        "event_id": f"BTP-{np.random.randint(1000, 9999)}",
+        "status": "disrupted",
+        "affected_corridor": corridor_name,
+        "fleet_delay_estimate": f"+{duration_mins} mins",
+        "reroute_required": True,
+        "source": "BTP ASTraM API"
+    }
+    
+    with comm_col1:
+        st.markdown("**🐦 Official X (Twitter) Alert**")
+        st.code(tweet_text, language="text")
+        st.markdown(f'<a href="{tweet_url}" target="_blank" style="display: inline-block; padding: 0.5em 1em; color: white; background-color: #1DA1F2; border-radius: 5px; text-decoration: none; font-weight: bold;">Click to Post on X</a>', unsafe_allow_html=True)
+        
+        st.markdown("<br>**📻 FM Radio Broadcast Script**", unsafe_allow_html=True)
+        st.info(radio_script)
+
+    with comm_col2:
+        st.markdown("**📦 Logistics Webhook Payload (For Flipkart)**")
+        st.code(json.dumps(logistics_payload, indent=2), language="json")
 
 # --- Step 2: Intelligent Routing Engine ---
 if st.session_state.step1_complete:
     st.divider()
     st.markdown("## 📍 Step 2: Intelligent Routing Engine")
     
+    st.markdown("### 🚑 Routing Mode")
+    routing_mode = st.radio("Select Visualization:", ["Civilian Detour (Draw Start/End)", "Emergency Green Corridor (Auto-Route to Incident)"], horizontal=True)
+    st.write("") # small gap
+    
     route_col1, route_col2 = st.columns([1, 2])
     
     with route_col1:
-        st.info("Click the map to set your Start (A) and End (B) coordinates. The detour will calculate automatically.")
-        
-        # Initialize Step 2 Map Center
-        if "step2_map_center" not in st.session_state:
-            st.session_state.step2_map_center = [st.session_state.marker_lat, st.session_state.marker_lon]
+        if routing_mode == "Civilian Detour (Draw Start/End)":
+            st.info("Click the map to set your Start (A) and End (B) coordinates. The detour will calculate automatically.")
             
-        step2_m = folium.Map(location=st.session_state.step2_map_center, zoom_start=14)
-        
-        # Add Incident Area
-        folium.Marker(
-            [st.session_state.marker_lat, st.session_state.marker_lon], 
-            icon=folium.Icon(color="red", icon="warning-sign"),
-            tooltip="Incident Zone"
-        ).add_to(step2_m)
-        folium.Circle(
-            location=[st.session_state.marker_lat, st.session_state.marker_lon],
-            radius=incident_radius,
-            color='red', fill=True, fill_opacity=0.4
-        ).add_to(step2_m)
-        
-        # Add selected start/end points
-        if st.session_state.route_start:
-            folium.Marker(st.session_state.route_start, icon=folium.Icon(color="green", icon="play"), tooltip="Start").add_to(step2_m)
-        if st.session_state.route_end:
-            folium.Marker(st.session_state.route_end, icon=folium.Icon(color="black", icon="stop"), tooltip="End").add_to(step2_m)
-            
-        # Render map and catch clicks
-        map_data = st_folium(step2_m, width=350, height=350, returned_objects=["last_clicked"])
-        
-        if map_data and map_data.get("last_clicked"):
-            lat = map_data["last_clicked"]["lat"]
-            lon = map_data["last_clicked"]["lng"]
-            coord = (lat, lon)
-            
-            if st.session_state.get("last_click_coord") != coord:
-                st.session_state.last_click_coord = coord
-                if not st.session_state.route_start:
-                    st.session_state.route_start = [lat, lon]
-                    st.rerun()
-                elif not st.session_state.route_end:
-                    st.session_state.route_end = [lat, lon]
-                    st.rerun()
+            # Initialize Step 2 Map Center
+            if "step2_map_center" not in st.session_state:
+                st.session_state.step2_map_center = [st.session_state.marker_lat, st.session_state.marker_lon]
                 
-        if st.button("🔄 Clear Route Points"):
-            st.session_state.route_start = None
-            st.session_state.route_end = None
-            st.session_state.last_click_coord = None
-            st.rerun()
+            step2_m = folium.Map(location=st.session_state.step2_map_center, zoom_start=14)
             
-        vehicle_type = st.selectbox("Vehicle Classification", ["2-Wheeler", "Car", "Heavy Truck"])
-        vehicle_width_map = {"2-Wheeler": 1.0, "Car": 2.5, "Heavy Truck": 4.0}
-        required_width = vehicle_width_map[vehicle_type]
+            # Add Incident Area
+            folium.Marker(
+                [st.session_state.marker_lat, st.session_state.marker_lon], 
+                icon=folium.Icon(color="red", icon="warning-sign"),
+                tooltip="Incident Zone"
+            ).add_to(step2_m)
+            folium.Circle(
+                location=[st.session_state.marker_lat, st.session_state.marker_lon],
+                radius=incident_radius,
+                color='red', fill=True, fill_opacity=0.4
+            ).add_to(step2_m)
+            
+            # Add selected start/end points
+            if st.session_state.route_start:
+                folium.Marker(st.session_state.route_start, icon=folium.Icon(color="green", icon="play"), tooltip="Start").add_to(step2_m)
+            if st.session_state.route_end:
+                folium.Marker(st.session_state.route_end, icon=folium.Icon(color="black", icon="stop"), tooltip="End").add_to(step2_m)
+                
+            # Render map and catch clicks
+            map_data = st_folium(step2_m, width=350, height=350, returned_objects=["last_clicked"])
+            
+            if map_data and map_data.get("last_clicked"):
+                lat = map_data["last_clicked"]["lat"]
+                lon = map_data["last_clicked"]["lng"]
+                coord = (lat, lon)
+                
+                if st.session_state.get("last_click_coord") != coord:
+                    st.session_state.last_click_coord = coord
+                    if not st.session_state.route_start:
+                        st.session_state.route_start = [lat, lon]
+                        st.rerun()
+                    elif not st.session_state.route_end:
+                        st.session_state.route_end = [lat, lon]
+                        st.rerun()
+                    
+            if st.button("🔄 Clear Route Points"):
+                st.session_state.route_start = None
+                st.session_state.route_end = None
+                st.session_state.last_click_coord = None
+                st.rerun()
+                
+            vehicle_type = st.selectbox("Vehicle Classification", ["2-Wheeler", "Car", "Heavy Truck"])
+            vehicle_width_map = {"2-Wheeler": 1.0, "Car": 2.5, "Heavy Truck": 4.0}
+            required_width = vehicle_width_map[vehicle_type]
+            
+        else:
+            st.info("🚑 **Emergency Mode Active.**\n\nNo manual mapping is required. The algorithm will automatically determine the nearest medical facility and route directly to the incident coordinates.")
+            
+            # We must still define these variables to prevent errors in route_col2 if they try to access them (though route_col2 shouldn't for this mode)
+            vehicle_type = "Car"
+            required_width = 2.5
         
     with route_col2:
-        if not st.session_state.route_start:
-            st.warning("⚠️ Waiting for Start Point... (Click Map)")
-        elif not st.session_state.route_end:
-            st.warning("⚠️ Waiting for End Point... (Click Map)")
-        else:
-            # Both points acquired. Auto-Calculate.
-            start_lat, start_lon = st.session_state.route_start
-            end_lat, end_lon = st.session_state.route_end
-            
-            st.success("Points Acquired! Calculating intelligent detour...")
-            with st.spinner(f"Evaluating graph constraints for {vehicle_type}..."):
+        if routing_mode == "Civilian Detour (Draw Start/End)":
+            if not st.session_state.route_start:
+                st.warning("⚠️ Waiting for Start Point... (Click Map)")
+            elif not st.session_state.route_end:
+                st.warning("⚠️ Waiting for End Point... (Click Map)")
+            else:
+                # Both points acquired. Auto-Calculate.
+                start_lat, start_lon = st.session_state.route_start
+                end_lat, end_lon = st.session_state.route_end
+                
+                st.success("Points Acquired! Calculating intelligent detour...")
+                with st.spinner(f"Evaluating graph constraints for {vehicle_type}..."):
+                    try:
+                        G = get_city_graph()
+                        G_route = G.copy()
+                        
+                        # Retrieve Step 1 capacity data
+                        u, v, key = st.session_state.impacted_edge
+                        max_continuous_gap = st.session_state.max_continuous_gap
+                        
+                        detour_triggered = False
+                        if max_continuous_gap < required_width:
+                            # Vehicle is too wide to pass safely. Cut the edge from the graph.
+                            G_route.remove_edge(u, v, key)
+                            if G_route.has_edge(v, u, key):
+                                G_route.remove_edge(v, u, key)
+                            detour_triggered = True
+                            st.error(f"🚨 **Constraint Failed:** {vehicle_type} requires {required_width}m. Only {max(0, max_continuous_gap):.1f}m gap available. Forcing mathematical detour.")
+                        else:
+                            st.success(f"✅ **Constraint Passed:** {vehicle_type} requires {required_width}m. {max_continuous_gap:.1f}m gap available. Proceeding directly through impacted zone.")
+                        
+                        # Inject Virtual Nodes directly into the routing graph
+                        start_node = inject_virtual_node(G_route, start_lat, start_lon, "V_START")
+                        end_node = inject_virtual_node(G_route, end_lat, end_lon, "V_END")
+                        
+                        # Calculate Absolute Shortest Topological Path
+                        route = None
+                        try:
+                            route = nx.shortest_path(G_route, start_node, end_node, weight='length')
+                        except nx.NetworkXNoPath:
+                            pass
+                                
+                        if route is None or len(route) < 2:
+                            st.error("🚫 **Routing Failed:** Blocking this route makes this movement impossible under current vehicle constraints. No alternative mathematical path exists.")
+                        else:
+                            # Render the Map
+                            route_gdf = ox.routing.route_to_gdf(G_route, route)
+                            route_map = route_gdf.explore(
+                                color="blue", style_kwds={"weight": 5, "opacity": 0.8}, 
+                                tiles="OpenStreetMap", width="100%", height="100%"
+                            )
+                            
+                            # Add Interactive Markers
+                            folium.Marker(
+                                location=[st.session_state.marker_lat, st.session_state.marker_lon], 
+                                popup="INCIDENT ZONE", icon=folium.Icon(color="red", icon="warning-sign")
+                            ).add_to(route_map)
+                            folium.Marker([start_lat, start_lon], tooltip="Origin", icon=folium.Icon(color="green", icon="play")).add_to(route_map)
+                            folium.Marker([end_lat, end_lon], tooltip="Destination", icon=folium.Icon(color="black", icon="stop")).add_to(route_map)
+                            
+                            st_folium(route_map, width=700, height=450, returned_objects=[])
+                            
+                    except Exception as e:
+                        st.error(f"Routing computation failed. Ensure coordinates are valid. Details: {e}")
+
+        elif routing_mode == "Emergency Green Corridor (Auto-Route to Incident)":
+            st.success("🚨 Computing direct Green Corridor to the Incident Site...")
+            with st.spinner("Finding nearest hospital and securing route..."):
                 try:
                     G = get_city_graph()
-                    G_route = G.copy()
+                    incident_lat = st.session_state.marker_lat
+                    incident_lon = st.session_state.marker_lon
                     
-                    # Retrieve Step 1 capacity data
-                    u, v, key = st.session_state.impacted_edge
-                    max_continuous_gap = st.session_state.max_continuous_gap
-                    
-                    detour_triggered = False
-                    if max_continuous_gap < required_width:
-                        # Vehicle is too wide to pass safely. Cut the edge from the graph.
-                        G_route.remove_edge(u, v, key)
-                        if G_route.has_edge(v, u, key):
-                            G_route.remove_edge(v, u, key)
-                        detour_triggered = True
-                        st.error(f"🚨 **Constraint Failed:** {vehicle_type} requires {required_width}m. Only {max(0, max_continuous_gap):.1f}m gap available. Forcing mathematical detour.")
-                    else:
-                        st.success(f"✅ **Constraint Passed:** {vehicle_type} requires {required_width}m. {max_continuous_gap:.1f}m gap available. Proceeding directly through impacted zone.")
-                    
-                    # Inject Virtual Nodes directly into the routing graph
-                    start_node = inject_virtual_node(G_route, start_lat, start_lon, "V_START")
-                    end_node = inject_virtual_node(G_route, end_lat, end_lon, "V_END")
-                    
-                    # Calculate Absolute Shortest Topological Path
-                    route = None
-                    try:
-                        route = nx.shortest_path(G_route, start_node, end_node, weight='length')
-                    except nx.NetworkXNoPath:
-                        pass
-                            
-                    if route is None or len(route) < 2:
-                        st.error("🚫 **Routing Failed:** Blocking this route makes this movement impossible under current vehicle constraints. No alternative mathematical path exists.")
-                    else:
-                        # Render the Map
-                        route_gdf = ox.routing.route_to_gdf(G_route, route)
-                        route_map = route_gdf.explore(
-                            color="blue", style_kwds={"weight": 5, "opacity": 0.8}, 
-                            tiles="OpenStreetMap", width="100%", height="100%"
+                    st.info("🚑 Searching OpenStreetMap for real hospitals within 5km...")
+                    hospitals = ox.features_from_point((incident_lat, incident_lon), tags={'amenity': 'hospital'}, dist=5000)
+                    if not hospitals.empty:
+                        centroids = hospitals.geometry.centroid
+                        hospitals['distance'] = centroids.apply(
+                            lambda geom: haversine(incident_lat, incident_lon, geom.y, geom.x)
                         )
+                        nearest_hospital = hospitals.loc[hospitals['distance'].idxmin()]
                         
-                        # Add Interactive Markers
-                        folium.Marker(
-                            location=[st.session_state.marker_lat, st.session_state.marker_lon], 
-                            popup="INCIDENT ZONE", icon=folium.Icon(color="red", icon="warning-sign")
-                        ).add_to(route_map)
-                        folium.Marker([start_lat, start_lon], tooltip="Origin", icon=folium.Icon(color="green", icon="play")).add_to(route_map)
-                        folium.Marker([end_lat, end_lon], tooltip="Destination", icon=folium.Icon(color="black", icon="stop")).add_to(route_map)
+                        hosp_geom = nearest_hospital.geometry
+                        if hosp_geom.geom_type == 'Polygon' or hosp_geom.geom_type == 'MultiPolygon':
+                            hosp_lat = hosp_geom.centroid.y
+                            hosp_lon = hosp_geom.centroid.x
+                        else:
+                            hosp_lat = hosp_geom.y
+                            hosp_lon = hosp_geom.x
+                            
+                        hosp_name = nearest_hospital.get('name', 'Nearest Hospital')
+                        if type(hosp_name) is pd.Series:
+                            hosp_name = hosp_name.iloc[0]
+                        if pd.isna(hosp_name):
+                            hosp_name = "Nearest Hospital"
+                            
+                        # Inject virtual node for precise incident routing
+                        incident_node = inject_virtual_node(G, incident_lat, incident_lon, "V_INCIDENT")
+                        hosp_node = ox.distance.nearest_nodes(G, hosp_lon, hosp_lat)
                         
-                        st_folium(route_map, width=700, height=450, returned_objects=[])
-                        
+                        try:
+                            amb_route = nx.shortest_path(G, hosp_node, incident_node, weight='length')
+                            amb_gdf = ox.routing.route_to_gdf(G, amb_route)
+                            
+                            green_map = folium.Map(location=[incident_lat, incident_lon], zoom_start=14)
+                            
+                            amb_gdf.explore(
+                                m=green_map,
+                                color="#00FF00", style_kwds={"weight": 7, "dashArray": "10, 10"}, 
+                                name="Ambulance Green Corridor"
+                            )
+                            folium.Marker(
+                                [incident_lat, incident_lon], 
+                                tooltip="INCIDENT ZONE", icon=folium.Icon(color="red", icon="warning-sign")
+                            ).add_to(green_map)
+                            folium.Marker(
+                                [hosp_lat, hosp_lon], 
+                                tooltip=f"🚑 {hosp_name} (Ambulance Dispatch)", 
+                                icon=folium.Icon(color="white", icon_color="green", icon="plus", prefix="fa")
+                            ).add_to(green_map)
+                            
+                            st_folium(green_map, width=700, height=450, returned_objects=[])
+                            st.success(f"🚑 Green Corridor secured! Routing ambulance from **{hosp_name}** directly to the incident.")
+                            
+                        except Exception as e:
+                            st.warning("Could not calculate a clear path from the hospital to the crash site.")
+                    else:
+                        st.warning("No OSM hospitals found within a 5km radius.")
                 except Exception as e:
-                    st.error(f"Routing computation failed. Ensure coordinates are valid. Details: {e}")
+                    import traceback
+                    st.warning(f"OSMnx Hospital Query Failed: {e}")
+                    st.code(traceback.format_exc(), language="python")
 
 # --- Global Static Footer ---
 st.markdown('''

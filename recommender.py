@@ -1,7 +1,7 @@
 import pulp
 import re
 
-def generate_recommendations(duration_mins, event_type, event_cause, requires_road_closure, crowd_size=0, desc_text=""):
+def generate_recommendations(duration_mins, event_type, event_cause, requires_road_closure, crowd_size=0, desc_text="", corridor="unknown"):
     """
     V2 Recommendation Engine: Operations Research (Linear Programming)
     Uses the PuLP library to calculate the mathematically optimal distribution 
@@ -58,7 +58,18 @@ def generate_recommendations(duration_mins, event_type, event_cause, requires_ro
     # 3. Define Variables (Integer)
     cops = pulp.LpVariable("Police_Officers", lowBound=0, upBound=base_cops_limit, cat='Integer')
     barricades = pulp.LpVariable("Barricades", lowBound=0, upBound=max(50, int(duration_mins/15)*2 + 10), cat='Integer')
-    max_tow_limit = max(2, num_vehicles + 1)
+    # Determine Road Capacity Ceil for Tow Trucks
+    corridor_lower = corridor.lower()
+    if "ring" in corridor_lower or "highway" in corridor_lower:
+        road_tow_ceil = 3
+    elif "main" in corridor_lower or "cross" in corridor_lower:
+        road_tow_ceil = 2
+    else:
+        road_tow_ceil = 1
+        
+    # Cap the tow trucks by road type, absolute max ceil is 3
+    max_tow_limit = min(3, road_tow_ceil)
+    
     tow_trucks = pulp.LpVariable("Tow_Trucks", lowBound=0, upBound=max_tow_limit, cat='Integer')
     
     # 4. Objective Function (Tactical Effectiveness)
@@ -82,9 +93,9 @@ def generate_recommendations(duration_mins, event_type, event_cause, requires_ro
     
     # Minimum tow truck requirements
     if num_vehicles > 0:
-        prob += tow_trucks >= num_vehicles, "Min_Tow_NLP"
+        prob += tow_trucks >= min(num_vehicles, max_tow_limit), "Min_Tow_NLP"
     elif event_cause == "accident":
-        prob += tow_trucks >= 1, "Min_Tow_Accident"
+        prob += tow_trucks >= min(1, max_tow_limit), "Min_Tow_Accident"
         
     # Additional baseline overrides for severe event types
     if event_cause in ["tree_fall", "water_logging"] or requires_road_closure in ["TRUE", "yes", True]:
