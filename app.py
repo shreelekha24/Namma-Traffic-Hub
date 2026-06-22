@@ -15,6 +15,12 @@ from streamlit_folium import st_folium
 from shapely.geometry import LineString, Point
 from shapely.ops import substring
 import numpy as np
+import google.generativeai as genai
+from dotenv import load_dotenv
+from PIL import Image
+import re
+
+load_dotenv(override=True)
 
 # --- Page Config ---
 st.set_page_config(page_title="Namma Traffic Hub", page_icon="🚔", layout="wide")
@@ -249,11 +255,25 @@ if models_loaded:
     if "route_end" not in st.session_state:
         st.session_state.route_end = None
         
+    # UI Session State Keys for Auto-Fill
+    if "event_cause_val" not in st.session_state:
+        st.session_state.event_cause_val = options['event_cause'][0]
+    if "veh_type_val" not in st.session_state:
+        st.session_state.veh_type_val = options['veh_type'][0]
+    if "priority_val" not in st.session_state:
+        st.session_state.priority_val = options['priority'][0]
+    if "incident_radius_val" not in st.session_state:
+        st.session_state.incident_radius_val = 5
+    if "desc_text_val" not in st.session_state:
+        st.session_state.desc_text_val = "Severe accident, truck overturned blocking both lanes."
+    if "ai_rerun" not in st.session_state:
+        st.session_state.ai_rerun = False
+        
     # 1. Text Search to center the map
     address_query = st.sidebar.text_input("🔍 Search Landmark (Press Enter to center map)", st.session_state.last_query)
     
     st.sidebar.markdown("---")
-    incident_radius = st.sidebar.slider("Impact Radius (Meters)", min_value=1, max_value=20, value=5)
+    incident_radius = st.sidebar.slider("Impact Radius (Meters)", min_value=1, max_value=20, value=st.session_state.incident_radius_val)
     
     # Update marker to searched location if search query changed
     if address_query != st.session_state.last_query:
@@ -329,14 +349,77 @@ if models_loaded:
     day_of_week = st.sidebar.selectbox("Day of Week", [0,1,2,3,4,5,6], format_func=lambda x: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][x])
     
     st.sidebar.subheader("Dispatch Notes")
-    description = st.sidebar.text_area("Enter on-ground updates...", "Severe accident, truck overturned blocking both lanes.")
+    description = st.sidebar.text_area("Enter on-ground updates...", value=st.session_state.desc_text_val)
+    uploaded_images = st.sidebar.file_uploader("Upload Incident Images (Max 10)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
+    if "processed_images" not in st.session_state:
+        st.session_state.processed_images = []
+        
+    current_image_names = [img.name for img in uploaded_images] if uploaded_images else []
+    
+    if current_image_names and current_image_names != st.session_state.processed_images:
+        with st.sidebar.status("👁️ Vision AI Analyzing...", expanded=True) as status:
+            st.write("Extracting details from images...")
+            try:
+                genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+                vision_model = genai.GenerativeModel('gemini-flash-latest')
+                pil_images = [Image.open(img) for img in uploaded_images]
+                
+                prompt = """Analyze these traffic incident images. 
+1. Generate a clear, professional dispatch note describing the scene. You MUST summarize this into a crisp, concise paragraph of exactly 2 to 3 lines maximum. Include the vehicle count and note any visible hazards (e.g., "Due to water logging, 2 bikes and 1 car are stuck blocking the road").
+2. Estimate the total impact radius of the blockage in meters (assume a standard car is 4.5m long and a standard traffic lane is 3.5m wide). 
+3. Classify the incident into the following exact categories:
+   - EVENT_CAUSE: [accident, congestion, construction, others, pot_holes, procession, protest, road_conditions, test_demo, tree_fall, vehicle_breakdown, water_logging]
+   - VEH_TYPE: [Unknown, auto, bmtc_bus, heavy_vehicle, ksrtc_bus, lcv, others, private_bus, private_car, taxi, truck]
+   - PRIORITY: [High, Low]
 
+At the very end of your response, you MUST print exactly:
+ESTIMATED_RADIUS: <number>
+EVENT_CAUSE: <string>
+VEH_TYPE: <string>
+PRIORITY: <string>"""
+
+                response = vision_model.generate_content([prompt] + pil_images)
+                response_text = response.text
+                
+                # Extract the auto-detected radius
+                match_rad = re.search(r'ESTIMATED_RADIUS:\s*([\d\.]+)', response_text)
+                if match_rad:
+                    detected_radius = float(match_rad.group(1))
+                    incident_radius_ai = int(min(max(detected_radius, 1), 20))
+                    st.session_state.incident_radius_val = incident_radius_ai
+                    
+                # Extract parameters
+                match_cause = re.search(r'EVENT_CAUSE:\s*(\w+)', response_text)
+                if match_cause and match_cause.group(1) in options['event_cause']:
+                    st.session_state.event_cause_val = match_cause.group(1)
+
+                match_veh = re.search(r'VEH_TYPE:\s*(\w+)', response_text)
+                if match_veh and match_veh.group(1) in options['veh_type']:
+                    st.session_state.veh_type_val = match_veh.group(1)
+
+                match_pri = re.search(r'PRIORITY:\s*(\w+)', response_text)
+                if match_pri and match_pri.group(1) in options['priority']:
+                    st.session_state.priority_val = match_pri.group(1)
+
+                # Clean the tags from the final description
+                response_text = re.sub(r'ESTIMATED_RADIUS:\s*[\d\.]+', '', response_text)
+                response_text = re.sub(r'EVENT_CAUSE:\s*\w+', '', response_text)
+                response_text = re.sub(r'VEH_TYPE:\s*\w+', '', response_text)
+                response_text = re.sub(r'PRIORITY:\s*\w+', '', response_text).strip()
+
+                st.session_state.desc_text_val = response_text
+                st.session_state.processed_images = current_image_names
+                status.update(label="👁️ Vision AI Auto-Fill Complete!", state="complete", expanded=False)
+                st.rerun()
+            except Exception as e:
+                st.warning(f"⚠️ **Vision AI Error:** {e}")
+                st.session_state.processed_images = current_image_names
 
     st.sidebar.subheader("Incident Details")
-    event_cause = st.sidebar.selectbox("Event Cause", options['event_cause'], index=0)
-    veh_type = st.sidebar.selectbox("Vehicle Type", options['veh_type'], index=0)
-    priority = st.sidebar.selectbox("Priority Level", options['priority'], index=0)
+    event_cause = st.sidebar.selectbox("Event Cause", options['event_cause'], index=options['event_cause'].index(st.session_state.event_cause_val))
+    veh_type = st.sidebar.selectbox("Vehicle Type", options['veh_type'], index=options['veh_type'].index(st.session_state.veh_type_val))
+    priority = st.sidebar.selectbox("Priority Level", options['priority'], index=options['priority'].index(st.session_state.priority_val))
     
     with st.sidebar.expander("⚙️ Optional Advanced Predictors"):
         st.caption("*(Only needed when the event involves a vehicle breakdown or cargo)*")
@@ -346,11 +429,18 @@ if models_loaded:
     
     force_road_closure = st.sidebar.checkbox("⚠️ Force Full Road Closure (Manual Override)")
 
-
-
     # --- Process Inputs on Button Click ---
     if st.sidebar.button("🚨 Predict & Generate Plan", type="primary"):
+        if not description.strip() and not uploaded_images:
+            st.sidebar.error("Please provide either a text description or upload incident images.")
+            st.stop()
+        if uploaded_images and len(uploaded_images) > 10:
+            st.sidebar.error("Maximum 10 pictures allowed.")
+            st.stop()
+            
         with st.spinner("Executing ML Auto-Dispatch & NLP Solver..."):
+            
+            ai_description = ""
             
             # Step 1: Auto-Predict Jurisdiction and Corridor
             auto_spatial_df = pd.DataFrame({'latitude': [latitude], 'longitude': [longitude]})
@@ -366,6 +456,8 @@ if models_loaded:
             # 2. NLP Features (Transformer + PCA)
             try:
                 base_desc = description if description else ""
+                if ai_description:
+                    base_desc = f"{base_desc} {ai_description}".strip()
                 mega_text = f"{base_desc} {reason_breakdown} {cargo_material} {comment}".strip()
                 if not mega_text:
                     mega_text = "none"
@@ -529,6 +621,10 @@ if models_loaded:
                 'max_continuous_gap': max_continuous_gap
             }
             st.session_state.step1_complete = True
+            
+            if st.session_state.get('ai_rerun', False):
+                st.session_state.ai_rerun = False
+                st.rerun()
 
 # --- Step 1 UI Rendering (Decoupled from Button) ---
 if st.session_state.step1_complete:
