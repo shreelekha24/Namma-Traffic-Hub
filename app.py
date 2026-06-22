@@ -192,6 +192,9 @@ if models_loaded:
     # 1. Text Search to center the map
     address_query = st.sidebar.text_input("🔍 Search Landmark (Press Enter to center map)", st.session_state.last_query)
     
+    st.sidebar.markdown("---")
+    incident_radius = st.sidebar.slider("Impact Radius (Meters)", min_value=1, max_value=20, value=5)
+    
     # Update marker to searched location if search query changed
     if address_query != st.session_state.last_query:
         st.session_state.last_query = address_query
@@ -209,6 +212,16 @@ if models_loaded:
         [st.session_state.marker_lat, st.session_state.marker_lon], 
         icon=folium.Icon(color="red", icon="info-sign"),
         tooltip="Incident Location"
+    ).add_to(m)
+    
+    # Add a transparent circle representing the impact radius
+    folium.Circle(
+        location=[st.session_state.marker_lat, st.session_state.marker_lon],
+        radius=incident_radius,
+        color='red',
+        fill=True,
+        fill_color='red',
+        fill_opacity=0.4
     ).add_to(m)
     
     # Create Dashboard Layout
@@ -450,44 +463,76 @@ if models_loaded:
                         try:
                             nearest_edge = ox.distance.nearest_edges(G_copy, longitude, latitude)
                             u, v, key = nearest_edge
+                            # --- Dynamic Capacity Engine ---
+                            edge_data = G_copy.get_edge_data(u, v, key)
+                            highway_type = edge_data.get('highway', 'unclassified')
+                            if isinstance(highway_type, list): highway_type = highway_type[0]
                             
-                            # 2. Block the road by removing it from our mathematical graph
-                            G_copy.remove_edge(u, v, key)
-                            if G_copy.has_edge(v, u, key):
-                                G_copy.remove_edge(v, u, key)
-                                
-                            # 3. Calculate Detour topologically (from u to v through the rest of the city)
-                            # This completely avoids "off map" errors caused by guessing coordinates
-                            route = None
-                            try:
-                                route = nx.shortest_path(G_copy, u, v, weight='length')
-                            except nx.NetworkXNoPath:
-                                try:
-                                    route = nx.shortest_path(G_copy, v, u, weight='length')
-                                except nx.NetworkXNoPath:
-                                    pass
+                            # Dictionary for Indian road widths (Meters)
+                            width_map = {
+                                'trunk': 12, 'primary': 10, 'secondary': 8,
+                                'tertiary': 6, 'residential': 4, 'unclassified': 5
+                            }
+                            total_road_width = width_map.get(highway_type, 5)
+                            remaining_width = total_road_width - incident_radius
                             
-                            if route is None or len(route) < 2:
-                                st.warning("⚠️ Blocking this road segment completely cuts off the area. No detour possible.")
-                                route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
+                            st.markdown("### 🛣️ Dynamic Capacity Assessment")
+                            st.write(f"**Road Type:** `{highway_type}` | **Total Width:** `{total_road_width}m`")
+                            st.write(f"**Incident Radius:** `{incident_radius}m` | **Remaining Width:** `{max(0, remaining_width)}m`")
+                            
+                            # Decision Tree for Closure vs Partial Restriction
+                            trigger_detour = False
+                            
+                            if remaining_width <= 0:
+                                st.error("🚨 Full Closure: 0m remaining. Triggering detour.")
+                                trigger_detour = True
+                            elif remaining_width <= 2:
+                                st.warning("🚧 Partial Closure: 2-Wheelers ONLY. Detour bypassed.")
+                            elif remaining_width <= 4:
+                                st.info("⚠️ Partial Closure: Cars & 2-Wheelers allowed. Heavy Trucks diverted.")
                             else:
-                                # Plot the detour path
-                                route_gdf = ox.routing.route_to_gdf(G_copy, route)
-                                route_map = route_gdf.explore(
-                                    color="red", 
-                                    style_kwds={"weight": 5, "opacity": 0.8}, 
-                                    tiles="OpenStreetMap",
-                                    width="100%", 
-                                    height="100%"
-                                )
+                                st.success("✅ Road Open: Speed restrictions applied.")
+                                
+                            if trigger_detour:
+                                # 2. Block the road by removing it from our mathematical graph
+                                G_copy.remove_edge(u, v, key)
+                                if G_copy.has_edge(v, u, key):
+                                    G_copy.remove_edge(v, u, key)
+                                    
+                                # 3. Calculate Detour topologically
+                                route = None
+                                try:
+                                    route = nx.shortest_path(G_copy, u, v, weight='length')
+                                except nx.NetworkXNoPath:
+                                    try:
+                                        route = nx.shortest_path(G_copy, v, u, weight='length')
+                                    except nx.NetworkXNoPath:
+                                        pass
+                                
+                                if route is None or len(route) < 2:
+                                    st.warning("⚠️ Blocking this road segment completely cuts off the area. No detour possible.")
+                                    route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
+                                else:
+                                    route_gdf = ox.routing.route_to_gdf(G_copy, route)
+                                    route_map = route_gdf.explore(
+                                        color="red", style_kwds={"weight": 5, "opacity": 0.8}, 
+                                        tiles="OpenStreetMap", width="100%", height="100%"
+                                    )
+                            else:
+                                # No detour calculated, just show the incident map
+                                route_map = folium.Map(location=[latitude, longitude], zoom_start=16, tiles="OpenStreetMap")
+                            
                         except Exception as e:
                             st.error(f"Routing error: Could not process graph edges. Details: {str(e)}")
                             route_map = folium.Map(location=[latitude, longitude], zoom_start=14, tiles="OpenStreetMap")
                         
+                        # Add Marker & Circle to output map
                         folium.Marker(location=(latitude, longitude), popup="ACCIDENT ZONE", icon=folium.Icon(color="black", icon="info-sign")).add_to(route_map)
+                        folium.Circle(location=[latitude, longitude], radius=incident_radius, color='red', fill=True, fill_color='red', fill_opacity=0.4).add_to(route_map)
                         
                         st_folium(route_map, width=500, height=400, returned_objects=[])
-                        st.success("Route mathematically optimized bypassing the incident node.")
+                        if trigger_detour:
+                            st.success("Route mathematically optimized bypassing the incident node.")
                     except nx.NetworkXNoPath:
                         st.error("No valid diversion path found around the incident.")
                     except Exception as e:
