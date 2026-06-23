@@ -14,3 +14,4 @@ sentence-transformers
 pulp
 torchvision
 google-generativeai
+python-dotenv
