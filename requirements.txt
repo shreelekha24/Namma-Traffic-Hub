@@ -13,3 +13,4 @@ catboost
 sentence-transformers
 pulp
 torchvision
+google-generativeai
